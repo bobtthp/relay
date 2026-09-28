@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Package source archive
+        id: package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "Tag version $VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          ARCHIVE="relay-${VERSION}.tar.gz"
+          git archive --format=tar.gz --prefix="relay-${VERSION}/" --output="$ARCHIVE" HEAD
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.archive }}.sha256" \
+            --title "Relay ${GITHUB_REF_NAME#v}" \
+            --generate-notes

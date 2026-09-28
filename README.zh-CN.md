@@ -1,0 +1,80 @@
+# Relay
+
+[English](README.md) · [简体中文](README.zh-CN.md)
+
+Relay 让你通过浏览器继续在 Mac 上使用编程 Agent。当前仓库包含本地开源 Agent
+和浏览器页面；托管版 Relay Cloud 控制平面单独维护，不包含在此源码发布中。
+
+## 仓库结构
+
+```text
+apps/
+  web/             当前的本地优先浏览器产品
+packages/
+  agent/           面向 macOS 的开源 Relay Agent
+  protocol/        开放协议类型、版本管理和客户端 SDK
+  shared/          共享领域类型和工具
+deploy/
+  launchd/         macOS LaunchAgent 安装脚本和指南
+  homebrew/        本地 Homebrew Formula 安装脚本和服务指南
+docs/
+  architecture.md  产品、信任边界和发布计划
+```
+
+更改 Agent 信任边界前，请先阅读[架构文档](docs/architecture.md)。
+
+## 安全模型
+
+Relay 可以启动会读取和修改本地代码仓库的编程 Agent。默认情况下，服务只监听
+`127.0.0.1`。如果要从本机以外访问，请使用 HTTPS，并配置 `RELAY_AUTH_TOKEN`。
+自动批准为可选功能，默认关闭；开启后请检查设置，并查看各会话中记录的活动。
+
+## 本地运行
+
+本地 Relay Agent 目前面向 macOS。请安装 Node.js 22 或更新版本和 Codex CLI，
+然后在本地终端运行 `codex login` 完成登录。Relay 使用现有的 CLI 登录状态，
+不会保存 Codex 凭据。
+
+```sh
+cp .env.example .env
+npm ci
+npm run dev:backend
+```
+
+在另一个终端运行 `npm run dev`，然后打开 `http://localhost:5173`。首次启动时，
+在 Relay 界面中选择一个本地 Git 仓库。
+
+## 开发
+
+```sh
+npm run check
+npm run build
+```
+
+Relay 状态默认保存在目标仓库之外。Codex 仍负责管理自己的会话历史。
+
+## 状态
+
+已实现：
+
+- 本地 Codex 会话发现与恢复、流式消息、任务中断和跨任务活动流。
+- 会话时间线会将连续的执行进度合并到同一张卡片，并在新内容到达时自动滚动，
+  让最新回复保持在视野中。
+- 每个任务的模型和推理强度由 Agent 保存；其他连接到该 Agent 的设备打开任务时，
+  会恢复对应设置。
+- 可选的任务完成提示音，支持三种音效、音量调节和试听。
+- 适配手机的浏览器界面，包括移动导航抽屉和窄屏布局。
+- 命令、文件修改和权限审批；MCP 表单与 URL 确认；Codex 用户输入问题。
+- 可选的自动批准功能，默认关闭，并由 Agent 保存设置供已连接设备共享。开启后，
+  Relay 会自动批准命令请求、有可审阅差异的文件修改，以及仅对当前轮生效的权限。
+  MCP URL、表单和 Codex 提问仍需手动处理。Relay 不会自动打开 MCP URL；不支持的
+  表单结构只能拒绝。
+- 本地任务缓存，以及仅监听回环地址的 macOS 服务安装方式：`deploy/launchd/` 中的
+  LaunchAgent 和 `deploy/homebrew/` 中的 Homebrew Formula/服务。
+
+计划中：抽离独立的本地 Relay Agent、设备配对、托管控制平面、SSH 设备注册、
+Claude 提供方和加密凭据存储。
+
+## 许可证
+
+[MIT](LICENSE)

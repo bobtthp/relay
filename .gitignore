@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-server/
+apps/cloud/
+.env
+.env.*
+!.env.example
+.env.local
+.relay/
+coverage/
+playwright-report/
+test-results/
+.DS_Store
+*.pem
+*.p12
+*.key

@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible problem in Relay
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not include credentials, session logs, private repository contents,
+        or other sensitive data. Report security vulnerabilities privately
+        using the process in SECURITY.md.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the behavior you saw and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: 1. …
+    validations:
+      required: true
+  - type: input
+    id: relay-version
+    attributes:
+      label: Relay version or commit
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: macOS and Node.js versions
+    validations:
+      required: false

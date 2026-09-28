@@ -1,0 +1,45 @@
+{
+  "name": "relay",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "vite --config apps/web/vite.config.ts",
+    "dev:backend": "npm run build:backend && node dist-server/packages/agent/src/server.js",
+    "build": "tsc -b && tsc -p packages/agent/tsconfig.json && vite build --config apps/web/vite.config.ts",
+    "build:backend": "tsc -p packages/agent/tsconfig.json",
+    "preview": "vite preview --config apps/web/vite.config.ts",
+    "check": "tsc -b && tsc -p packages/agent/tsconfig.json",
+    "test": "node --import tsx --test packages/agent/src/*.test.ts apps/web/tests/*.test.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.1.1",
+    "cors": "2.8.6",
+    "express": "5.2.1",
+    "lucide-react": "1.47.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "vite": "8.3.0",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/cors": "2.8.19",
+    "@types/express": "5.0.6",
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.1",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
