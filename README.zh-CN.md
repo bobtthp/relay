@@ -5,6 +5,10 @@
 Relay 让你通过浏览器继续在 Mac 上使用编程 Agent。当前仓库包含本地开源 Agent
 和浏览器页面；托管版 Relay Cloud 控制平面单独维护，不包含在此源码发布中。
 
+## 界面预览
+
+![Relay 页面：任务执行日志与 Codex 对话](cn.jpg)
+
 ## 仓库结构
 
 ```text
@@ -52,6 +56,37 @@ npm run build
 ```
 
 Relay 状态默认保存在目标仓库之外。Codex 仍负责管理自己的会话历史。
+
+## 安装为 macOS 服务
+
+需要 macOS、Homebrew 和已登录的 Codex CLI。请先在终端运行 `codex login`。
+
+`bobtthp/homebrew-relay` tap 和首个 GitHub Release 发布后，运行以下命令
+安装并启动服务：
+
+```sh
+brew install bobtthp/relay/relay
+brew services start bobtthp/relay/relay
+```
+
+安装后打开 `http://127.0.0.1:3000`。使用以下命令管理后台服务：
+
+```sh
+brew services stop bobtthp/relay/relay
+brew services restart bobtthp/relay/relay
+brew services list
+```
+
+卸载 Relay 但保留本地任务数据：
+
+```sh
+brew services stop bobtthp/relay/relay
+brew uninstall bobtthp/relay/relay
+```
+
+公开 tap 尚未发布，因此这些命令要等 tap 和首个版本发布后才能使用。
+维护者从本地源码安装可参考 [Homebrew 本地安装指南](deploy/homebrew/README.md)；
+另一种安装方式见 [LaunchAgent 指南](deploy/launchd/README.md)。
 
 ## 状态
 

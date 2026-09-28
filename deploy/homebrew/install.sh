@@ -10,6 +10,14 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
+NODE22_PREFIX=$(brew --prefix node@22 2>/dev/null || true)
+if [ ! -x "$NODE22_PREFIX/bin/node" ]; then
+  brew install node@22
+  NODE22_PREFIX=$(brew --prefix node@22)
+fi
+PATH="$NODE22_PREFIX/bin:$PATH"
+export PATH
+
 if [ -f "$LEGACY_PLIST" ]; then
   echo "The legacy Relay LaunchAgent is installed. Stop and remove it first with:" >&2
   echo "  sh \"$PROJECT_DIR/deploy/launchd/uninstall.sh\"" >&2

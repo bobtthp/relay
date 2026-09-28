@@ -7,6 +7,10 @@ repository contains the open-source local Agent and browser UI. The hosted
 Relay Cloud control plane is maintained separately and is not included in this
 source distribution.
 
+## Preview
+
+![Relay web interface showing task execution logs and the Codex conversation](en.jpg)
+
 ## Repository map
 
 ```text
@@ -57,6 +61,38 @@ npm run build
 
 Relay state is stored outside the target repository by default. Codex retains
 ownership of its own thread history.
+
+## Install as a macOS service
+
+Requirements: macOS, Homebrew, and the Codex CLI signed in with `codex login`.
+
+After the `bobtthp/homebrew-relay` tap and first GitHub Release are published,
+install and start Relay with:
+
+```sh
+brew install bobtthp/relay/relay
+brew services start bobtthp/relay/relay
+```
+
+Open `http://127.0.0.1:3000`. Manage the background service with:
+
+```sh
+brew services stop bobtthp/relay/relay
+brew services restart bobtthp/relay/relay
+brew services list
+```
+
+To uninstall Relay while keeping its local task data:
+
+```sh
+brew services stop bobtthp/relay/relay
+brew uninstall bobtthp/relay/relay
+```
+
+The public tap is not published yet, so these commands will work after the
+tap and first release are available. Maintainers installing from a local
+checkout can use the [local Homebrew guide](deploy/homebrew/README.md). See
+the [LaunchAgent guide](deploy/launchd/README.md) for the alternative setup.
 
 ## Status
 
