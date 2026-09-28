@@ -94,6 +94,27 @@ tap and first release are available. Maintainers installing from a local
 checkout can use the [local Homebrew guide](deploy/homebrew/README.md). See
 the [LaunchAgent guide](deploy/launchd/README.md) for the alternative setup.
 
+## Use Relay from a phone or iPad
+
+The responsive Relay interface works in mobile Safari on iPhone and iPad. Relay
+and the Codex CLI continue running on your Mac; the mobile device connects to
+that Mac to view tasks and send instructions.
+
+For private remote access, install and sign in to Tailscale on the Mac and
+mobile device, then use Tailscale Serve as an HTTPS proxy to
+`http://127.0.0.1:3000`. Open the Mac's Tailscale HTTPS address in Safari and
+limit access with your tailnet ACLs. Keep Relay bound to loopback; do not
+expose port 3000 to the public internet. See the
+[private remote access guide](deploy/launchd/README.md#private-remote-access).
+
+## Customize Relay
+
+Open the settings button in the top-right corner to change the reading size
+and interface language. You can enable task-completion sounds, choose Chime,
+Bell, or Digital, adjust the volume, and preview the sound. Automatic approval
+is optional and off by default; review its description in Settings before
+enabling it.
+
 ## Status
 
 Implemented:

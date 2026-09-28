@@ -88,6 +88,23 @@ brew uninstall bobtthp/relay/relay
 维护者从本地源码安装可参考 [Homebrew 本地安装指南](deploy/homebrew/README.md)；
 另一种安装方式见 [LaunchAgent 指南](deploy/launchd/README.md)。
 
+## 使用手机或 iPad 远程操作
+
+Relay 页面适配手机和 iPad 的 Safari。Relay 和 Codex CLI 仍在 Mac 上运行，
+手机或 iPad 连接这台 Mac 后即可查看任务并发送指令。
+
+如需私密远程访问，请在 Mac 和移动设备上安装并登录 Tailscale，再使用
+Tailscale Serve 将 HTTPS 请求转发到 `http://127.0.0.1:3000`。在 Safari
+中打开 Mac 的 Tailscale HTTPS 地址，并通过 tailnet ACL 限制可访问成员。
+Relay 应继续监听本机回环地址；不要把 3000 端口暴露到公网。详见
+[私密远程访问指南](deploy/launchd/README.md#private-remote-access)。
+
+## 自定义 Relay
+
+点击页面右上角的设置按钮，可以调整阅读字号和界面语言。你也可以开启任务
+完成提示音，在清脆、铃声和电子音之间选择，调节音量并试听。自动批准为可选
+功能，默认关闭；开启前请先阅读设置中的说明。
+
 ## 状态
 
 已实现：
