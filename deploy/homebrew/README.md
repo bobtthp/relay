@@ -54,6 +54,7 @@ CODEX_BIN=/path/to/codex
 PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-This local tap is generated from the checkout on this Mac. A distributable
-`brew tap` for other Macs will need a public or private source repository and
-tagged releases with checksums.
+This local tap is generated from the checkout on this Mac. For the published
+formula, see [GitHub releases and Homebrew formula](RELEASING.md). The source
+repository itself hosts the public tap formula; a separate tap repository is
+not required.

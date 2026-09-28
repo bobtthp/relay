@@ -61,10 +61,10 @@ Relay 状态默认保存在目标仓库之外。Codex 仍负责管理自己的�
 
 需要 macOS、Homebrew 和已登录的 Codex CLI。请先在终端运行 `codex login`。
 
-`bobtthp/homebrew-relay` tap 和首个 GitHub Release 发布后，运行以下命令
-安装并启动服务：
+首个 GitHub Release 发布后，先将源码仓库添加为 tap，再安装并启动服务：
 
 ```sh
+brew tap bobtthp/relay https://github.com/bobtthp/relay.git
 brew install bobtthp/relay/relay
 brew services start bobtthp/relay/relay
 ```

@@ -66,10 +66,11 @@ ownership of its own thread history.
 
 Requirements: macOS, Homebrew, and the Codex CLI signed in with `codex login`.
 
-After the `bobtthp/homebrew-relay` tap and first GitHub Release are published,
-install and start Relay with:
+After the first GitHub Release is published, add the source repository as a
+tap and install Relay:
 
 ```sh
+brew tap bobtthp/relay https://github.com/bobtthp/relay.git
 brew install bobtthp/relay/relay
 brew services start bobtthp/relay/relay
 ```

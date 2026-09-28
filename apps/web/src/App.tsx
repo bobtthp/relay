@@ -92,6 +92,40 @@ const ChatTranscript = memo(function ChatTranscript({ messages, agent, language 
   })}</div>
 })
 
+type ComposerActions = {
+  sendMessage: (message: string) => void
+  changeTaskModel: (model: string) => void
+}
+
+const TaskComposer = memo(function TaskComposer({
+  actions,
+  agent,
+  disabled,
+  language,
+  models,
+  model,
+  modelDisabled,
+  sendHint,
+}: {
+  actions: { current: ComposerActions }
+  agent: AgentName
+  disabled: boolean
+  language: 'en' | 'zh'
+  models: CodexModel[]
+  model: string
+  modelDisabled: boolean
+  sendHint: string
+}) {
+  const [draft, setDraft] = useState('')
+  const submit = () => {
+    if (!draft.trim() || disabled) return
+    actions.current.sendMessage(draft)
+    setDraft('')
+  }
+
+  return <div className="composer"><div className="composer-model-row"><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={disabled} placeholder={disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{sendHint}</span></div>
+})
+
 let completionAudioContext: AudioContext | undefined
 
 function ApprovalCard({ approval, language, onRespond }: { approval: PendingApproval; language: 'en' | 'zh'; onRespond: (response: Record<string, unknown>) => void }) {
@@ -149,7 +183,7 @@ function App() {
   const [projectPickerError, setProjectPickerError] = useState('')
   const [rateLimit, setRateLimit] = useState<RateLimits | null>(null)
   const [clock, setClock] = useState(Date.now())
-  const [composer, setComposer] = useState('')
+  const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
@@ -497,15 +531,14 @@ function App() {
     return () => { cancelled = true }
   }, [activeView, activityRefresh, tasks])
 
-  const sendMessage = () => {
-    if (!composer.trim() || tasks[activeTask].state === 'waiting_for_approval') return
-    const message = composer.trim()
+  const sendMessage = (draft: string) => {
+    if (!draft.trim() || tasks[activeTask].state === 'waiting_for_approval') return
+    const message = draft.trim()
     const task = tasks[activeTask]
     void apiAgentService.sendMessage(task, message, selectedModel || undefined, selectedEffort || undefined).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to send message'))
-    setComposer('')
   }
 
   const interruptTask = (task: Task) => {
@@ -570,6 +603,8 @@ function App() {
     setSelectedEffort(effort)
     if (task) saveTaskModel(task, model, effort)
   }
+
+  composerActionsRef.current = { sendMessage, changeTaskModel }
 
   const changeTaskEffort = (effort: string) => {
     setSelectedEffort(effort)
@@ -736,7 +771,7 @@ function App() {
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} />
             {tasks[activeTask].agent === 'Codex' && reasoningOptions.length > 0 && <div className="reasoning-control"><label htmlFor="turn-effort">Reasoning level</label><select id="turn-effort" value={selectedEffort} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onChange={event => changeTaskEffort(event.target.value)} title={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' ? 'The current turn is already using its selected level' : 'Choose a reasoning level for the next turn'}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select><span>Applies to the next turn</span></div>}
             {sent && <div className="sent-note"><span className="pulse" /> Message sent to {tasks[activeTask].agent}</div>}
-            <div className="composer"><div className="composer-model-row"><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={selectedModel} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || models.length === 0} onChange={event => changeTaskModel(event.target.value)} title={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(model => <option key={model.model} value={model.model}>{model.displayName || model.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={tasks[activeTask].state === 'waiting_for_approval'} placeholder={tasks[activeTask].state === 'waiting_for_approval' ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${tasks[activeTask].agent} anything...`} value={composer} onChange={e => setComposer(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendMessage() } }} /><button className="send-btn" onClick={sendMessage} disabled={tasks[activeTask].state === 'waiting_for_approval'} aria-label="Send message">↑</button><span className="composer-hint">{text.sendHint}</span></div>
+            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} disabled={tasks[activeTask].state === 'waiting_for_approval'} language={language} models={models} model={selectedModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || models.length === 0} sendHint={text.sendHint} />
             </div>
         </div></>}
       </main>

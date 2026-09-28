@@ -1,5 +1,5 @@
-# Copy this file to the tap repository as Formula/relay.rb and replace the
-# repository, version, and checksum placeholders for each release.
+# The release workflow renders this template to Formula/relay.rb in the source
+# repository after calculating the versioned release archive checksum.
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/@@GITHUB_OWNER@@/@@GITHUB_REPOSITORY@@"
