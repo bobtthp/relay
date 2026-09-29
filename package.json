@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "vite --config apps/web/vite.config.ts",
     "dev:backend": "npm run build:backend && node dist-server/packages/agent/src/server.js",
+    "dev:all": "node scripts/dev.mjs",
     "build": "tsc -b && tsc -p packages/agent/tsconfig.json && vite build --config apps/web/vite.config.ts",
     "build:backend": "tsc -p packages/agent/tsconfig.json",
     "preview": "vite preview --config apps/web/vite.config.ts",

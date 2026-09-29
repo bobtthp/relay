@@ -42,11 +42,11 @@ Relay 可以启动会读取和修改本地代码仓库的编程 Agent。默认�
 ```sh
 cp .env.example .env
 npm ci
-npm run dev:backend
+npm run dev:all
 ```
 
-在另一个终端运行 `npm run dev`，然后打开 `http://localhost:5173`。首次启动时，
-在 Relay 界面中选择一个本地 Git 仓库。
+这个命令会同时启动前后端；按 Ctrl+C 会一起停止。前端地址是
+`http://localhost:5173`。首次启动时，在 Relay 界面中选择一个本地 Git 仓库。
 
 ## 开发
 
