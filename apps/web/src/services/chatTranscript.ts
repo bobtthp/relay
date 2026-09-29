@@ -18,12 +18,21 @@ export function mergeSessionTimeline(history: Array<{ role: 'user' | 'assistant'
   // captured. Keep it intact after completion; only prepend Codex-only turns
   // from before Relay's first matching user message.
   const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
-  const eventStart = events.findIndex(event => event.role === 'user' && history.some(message => message.role === 'user' && normalize(message.text) === normalize(event.text)))
+  const historyUserMessages = new Set(history.filter(message => message.role === 'user').map(message => normalize(message.text)))
+  const eventStart = events.findIndex(event => event.role === 'user' && historyUserMessages.has(normalize(event.text)))
   if (eventStart < 0) {
     const merged: TranscriptMessage[] = history.map((message, index) => ({ ...message, id: `history-${index}` }))
+    const seen = new Set(merged.map(message => `${message.role}\0${normalize(message.text)}`))
     for (const event of events) {
-      const duplicate = event.role !== 'progress' && merged.some(message => message.role === event.role && normalize(message.text) === normalize(event.text))
-      if (!duplicate) merged.push(event)
+      if (event.role === 'progress') {
+        merged.push(event)
+        continue
+      }
+      const key = `${event.role}\0${normalize(event.text)}`
+      if (!seen.has(key)) {
+        seen.add(key)
+        merged.push(event)
+      }
     }
     return merged
   }

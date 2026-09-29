@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -33,6 +33,14 @@ const logLabel = (kind: NonNullable<TranscriptMessage['logType']>, language: 'en
   return labels[kind][language === 'zh' ? 1 : 0]
 }
 
+const ExecutionLogEntry = memo(function ExecutionLogEntry({ log, kind, language }: { log: TranscriptMessage; kind: NonNullable<TranscriptMessage['logType']>; language: 'en' | 'zh' }) {
+  const summary = log.text.split('\n').find(line => line.trim()) ?? ''
+  return <details className={`execution-log-entry ${kind}`}>
+    <summary><span className={`execution-log-kind ${kind}`}>{logLabel(kind, language)}</span>{log.createdAt && <time>{formatTime(log.createdAt)}</time>}{log.progressState && <span className="execution-log-state">{log.progressState === 'running' ? (language === 'zh' ? '执行中' : 'Running') : (language === 'zh' ? '已结束' : 'Finished')}</span>}<span className="execution-log-summary">{summary}</span></summary>
+    <div className="markdown-output message-markdown execution-log-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{log.text}</ReactMarkdown></div>
+  </details>
+})
+
 const ExecutionLogPanel = memo(function ExecutionLogPanel({ logs, taskState, language, onCollapse }: { logs: TranscriptMessage[]; taskState: Task['state']; language: 'en' | 'zh'; onCollapse: () => void }) {
   const logViewport = useRef<HTMLDivElement>(null)
   const followLatest = useRef(true)
@@ -61,15 +69,15 @@ const ExecutionLogPanel = memo(function ExecutionLogPanel({ logs, taskState, lan
     }}>
       {logs.length ? logs.map((log, index) => {
         const kind = log.logType ?? (log.eventType === 'error' ? 'error' : 'status')
-        const summary = log.text.split('\n').find(line => line.trim()) ?? ''
-        return <details className={`execution-log-entry ${kind}`} key={log.id ?? `${log.taskId}-${log.createdAt}-${index}`}>
-          <summary><span className={`execution-log-kind ${kind}`}>{logLabel(kind, language)}</span>{log.createdAt && <time>{formatTime(log.createdAt)}</time>}{log.progressState && <span className="execution-log-state">{log.progressState === 'running' ? (language === 'zh' ? '执行中' : 'Running') : (language === 'zh' ? '已结束' : 'Finished')}</span>}<span className="execution-log-summary">{summary}</span></summary>
-          <div className="markdown-output message-markdown execution-log-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{log.text}</ReactMarkdown></div>
-        </details>
+        return <ExecutionLogEntry key={log.id ?? `${log.taskId}-${log.createdAt}-${index}`} log={log} kind={kind} language={language} />
       }) : <div className="execution-log-empty">{language === 'zh' ? '此任务暂无执行日志' : 'No execution logs for this task yet.'}</div>}
     </div>
   </section>
 })
+
+const ChatMessage = memo(function ChatMessage({ message, agent, language }: { message: TranscriptMessage; agent: AgentName; language: 'en' | 'zh' }) {
+  return <div className={`preview-event session-message ${message.role}`}><div className="event-marker"><MessageSquare size={14} /></div><div><strong>{message.role === 'user' ? 'You' : agent}{message.createdAt && <span className="event-time">{formatTime(message.createdAt)}</span>}</strong><div className="markdown-output message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div></div></div>
+}, (previous, next) => previous.agent === next.agent && previous.language === next.language && previous.message.id === next.message.id && previous.message.role === next.message.role && previous.message.text === next.message.text && previous.message.createdAt === next.message.createdAt)
 
 const ChatTranscript = memo(function ChatTranscript({ messages, agent, language }: { messages: TranscriptMessage[]; agent: AgentName; language: 'en' | 'zh' }) {
   const transcriptRef = useRef<HTMLDivElement>(null)
@@ -87,10 +95,63 @@ const ChatTranscript = memo(function ChatTranscript({ messages, agent, language 
   return <div className="chat-transcript" ref={transcriptRef} onScroll={event => {
     const element = event.currentTarget
     followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 28
-  }}>{chatMessages.map((message, index) => {
-    return <div className={`preview-event session-message ${message.role}`} key={message.id ?? `${message.role}-${index}`}><div className="event-marker"><MessageSquare size={14} /></div><div><strong>{message.role === 'user' ? 'You' : agent}{message.createdAt && <span className="event-time">{formatTime(message.createdAt)}</span>}</strong><div className="markdown-output message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div></div></div>
-  })}</div>
+  }}>{chatMessages.map((message, index) => <ChatMessage key={message.id ?? `${message.role}-${index}`} message={message} agent={agent} language={language} />)}</div>
 })
+
+const RateLimitStatus = memo(function RateLimitStatus({ rateLimit }: { rateLimit: RateLimits }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const ticker = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(ticker)
+  }, [])
+  const resetInSeconds = Math.max(0, rateLimit.primary.resetsAt * 1000 - now) / 1_000
+  const formatCountdown = (seconds: number) => `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds % 3600 / 60)).padStart(2, '0')}m`
+  return <div className="topbar-token" title={`Codex 5-hour quota resets in ${formatCountdown(resetInSeconds)}`}><span>5h</span><strong>{rateLimit.primary.usedPercent}%</strong><i><b style={{ width: `${rateLimit.primary.usedPercent}%` }} /></i><em>↻ {formatCountdown(resetInSeconds)}</em>{rateLimit.secondary && <><span className="quota-week">7d</span><strong>{rateLimit.secondary.usedPercent}%</strong></>}</div>
+})
+
+const TaskDuration = memo(function TaskDuration({ task, language }: { task: Task; language: 'en' | 'zh' }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (task.state !== 'running') return
+    const ticker = window.setInterval(() => setNow(Date.now()), 1_000)
+    return () => window.clearInterval(ticker)
+  }, [task.state])
+
+  if (task.executionDurationMs == null) return <span className="task-duration">{language === 'zh' ? '用时 未记录' : 'Duration Not recorded'}</span>
+  const startedAt = task.executionStartedAt ? Date.parse(task.executionStartedAt) : NaN
+  const elapsed = task.executionDurationMs + (Number.isFinite(startedAt) && task.state === 'running' ? Math.max(0, now - startedAt) : 0)
+  const seconds = Math.floor(elapsed / 1_000)
+  const minutes = Math.floor(seconds / 60)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+  const duration = language === 'zh'
+    ? days ? `${days}天${hours % 24}小时` : hours ? `${hours}小时${minutes % 60}分` : minutes ? `${minutes}分${seconds % 60}秒` : `${seconds}秒`
+    : days ? `${days}d ${hours % 24}h` : hours ? `${hours}h ${minutes % 60}m` : minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`
+  return <span className="task-duration">{language === 'zh' ? '用时' : 'Duration'} {duration}</span>
+})
+
+function appendLiveEvent(current: TranscriptMessage[], incoming: TranscriptMessage): TranscriptMessage[] {
+  const existingIndex = incoming.id ? current.findIndex(item => item.id === incoming.id) : -1
+  if (existingIndex >= 0) {
+    const updated = [...current]
+    updated[existingIndex] = incoming
+    return updated
+  }
+  const deltaIndex = isStreamingDelta(incoming.method) && incoming.itemId
+    ? current.findIndex(item => item.taskId === incoming.taskId && item.method === incoming.method && item.itemId === incoming.itemId)
+    : -1
+  if (deltaIndex >= 0) {
+    const updated = [...current]
+    const previous = updated[deltaIndex]
+    updated[deltaIndex] = { ...previous, text: previous.text + incoming.text, createdAt: incoming.createdAt, eventType: incoming.eventType, logType: incoming.logType, progressState: incoming.progressState }
+    return updated
+  }
+  const previous = current.at(-1)
+  if (previous && isStreamingDelta(incoming.method) && previous.taskId === incoming.taskId && previous.method === incoming.method && previous.itemId === incoming.itemId) {
+    return [...current.slice(0, -1), { ...previous, text: previous.text + incoming.text }]
+  }
+  return [...current, incoming]
+}
 
 type ComposerActions = {
   sendMessage: (message: string) => void
@@ -150,6 +211,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [activeTask, setActiveTask] = useState(0)
   const [executionLogsCollapsed, setExecutionLogsCollapsed] = useState(() => window.innerWidth <= 1024)
+  const collapseExecutionLogs = useCallback(() => setExecutionLogsCollapsed(true), [])
   const [executionLogWidth, setExecutionLogWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('relay-execution-log-width'))
     return Number.isFinite(savedWidth) && savedWidth >= 220 ? Math.min(savedWidth, Math.max(220, window.innerWidth / 2)) : 310
@@ -182,7 +244,6 @@ function App() {
   const [directory, setDirectory] = useState<{ path: string; parent: string | null; items: Array<{ name: string; path: string; isGit: boolean }> } | null>(null)
   const [projectPickerError, setProjectPickerError] = useState('')
   const [rateLimit, setRateLimit] = useState<RateLimits | null>(null)
-  const [clock, setClock] = useState(Date.now())
   const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
@@ -193,6 +254,17 @@ function App() {
   const [selectedEffort, setSelectedEffort] = useState(() => localStorage.getItem('relay-codex-effort') || '')
   const [notice, setNotice] = useState('')
   const [liveEvents, setLiveEvents] = useState<TranscriptMessage[]>([])
+  const pendingLiveEvents = useRef<TranscriptMessage[]>([])
+  const liveEventFrame = useRef<number | null>(null)
+  const queueLiveEvent = (event: TranscriptMessage) => {
+    pendingLiveEvents.current.push(event)
+    if (liveEventFrame.current !== null) return
+    liveEventFrame.current = window.requestAnimationFrame(() => {
+      liveEventFrame.current = null
+      const batch = pendingLiveEvents.current.splice(0)
+      if (batch.length) setLiveEvents(current => batch.reduce(appendLiveEvent, current))
+    })
+  }
   const [sessionHistory, setSessionHistory] = useState<Array<{ role: 'user' | 'assistant'; text: string }>>([])
   const [activeView, setActiveView] = useState<'projects' | 'overview' | 'activity'>('projects')
   const [activityEvents, setActivityEvents] = useState<Array<{ taskId: string; taskTitle: string; role: 'user' | 'assistant' | 'progress'; text: string; createdAt: string }>>([])
@@ -246,19 +318,6 @@ function App() {
   const taskSelectOptions = tasks[activeTask]
     ? [{ task: tasks[activeTask], index: activeTask, selected: true }, ...visibleTasks.filter(({ index }) => index !== activeTask).map(option => ({ ...option, selected: false }))]
     : visibleTasks.map(option => ({ ...option, selected: false }))
-  const resetInSeconds = rateLimit ? Math.max(0, rateLimit.primary.resetsAt * 1000 - clock) / 1000 : 0
-  const formatCountdown = (seconds: number) => `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds % 3600 / 60)).padStart(2, '0')}m`
-  const formatTaskDuration = (task: Task, now = clock) => {
-    if (task.executionDurationMs == null) return language === 'zh' ? '未记录' : 'Not recorded'
-    const startedAt = task.executionStartedAt ? Date.parse(task.executionStartedAt) : NaN
-    const elapsed = task.executionDurationMs + (Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : 0)
-    const seconds = Math.floor(elapsed / 1000)
-    const minutes = Math.floor(seconds / 60)
-    const hours = Math.floor(minutes / 60)
-    const days = Math.floor(hours / 24)
-    if (language === 'zh') return days ? `${days}天${hours % 24}小时` : hours ? `${hours}小时${minutes % 60}分` : minutes ? `${minutes}分${seconds % 60}秒` : `${seconds}秒`
-    return days ? `${days}d ${hours % 24}h` : hours ? `${hours}h ${minutes % 60}m` : minutes ? `${minutes}m ${seconds % 60}s` : `${seconds}s`
-  }
   const statusLabel = (state: Task['state']) => ({ running: text.running, completed: text.completed, failed: language === 'zh' ? '失败' : 'Failed', interrupted: language === 'zh' ? '已中断' : 'Interrupted', waiting_for_approval: language === 'zh' ? '等待批准' : 'Waiting for approval' })[state]
   const selectedModelInfo = models.find(model => model.model === selectedModel)
   const reasoningOptions = selectedModelInfo?.supportedReasoningEfforts ?? []
@@ -428,8 +487,7 @@ function App() {
     }
     loadRateLimit()
     const refresh = window.setInterval(loadRateLimit, 30_000)
-    const ticker = window.setInterval(() => setClock(Date.now()), 1_000)
-    return () => { window.clearInterval(refresh); window.clearInterval(ticker) }
+    return () => window.clearInterval(refresh)
   }, [])
 
   useEffect(() => {
@@ -486,29 +544,15 @@ function App() {
           const itemId = message.event.payload?.itemId
           const role = message.event.type === 'user_message' ? 'user' as const : isFinalAssistantMessage(method) ? 'assistant' as const : 'progress' as const
           const logType = message.event.payload?.error || message.event.type === 'error' ? 'error' : message.event.type === 'test_result' ? 'test' : message.event.payload?.logType ?? (message.event.payload?.stderr ? 'warning' : undefined)
-          if (text) setLiveEvents(current => {
-            const existingIndex = current.findIndex(item => item.id === message.event!.id)
-            if (existingIndex >= 0) {
-              const updated = [...current]
-              updated[existingIndex] = { id: message.event!.id, taskId: message.event!.taskId, text, method, itemId, createdAt: message.event!.createdAt, role, eventType: message.event!.type, logType, progressState: message.event!.payload?.progressState }
-              return updated
-            }
-            const deltaIndex = isStreamingDelta(method) && itemId
-              ? current.findIndex(item => item.taskId === message.event!.taskId && item.method === method && item.itemId === itemId)
-              : -1
-            if (deltaIndex >= 0) {
-              const updated = [...current]
-              const previous = updated[deltaIndex]
-              updated[deltaIndex] = { ...previous, text: previous.text + text, createdAt: message.event!.createdAt, eventType: message.event!.type, logType, progressState: message.event!.payload?.progressState }
-              return updated
-            }
-            const previous = current.at(-1)
-          if (isStreamingDelta(method) && previous?.taskId === message.event!.taskId && previous.method === method && previous.itemId === itemId) return [...current.slice(0, -1), { ...previous, text: previous.text + text }]
-          return [...current, { id: message.event!.id, taskId: message.event!.taskId, text, method, itemId, createdAt: message.event!.createdAt, role, eventType: message.event!.type, logType, progressState: message.event!.payload?.progressState }]
-        })
+          if (text) queueLiveEvent({ id: message.event.id, taskId: message.event.taskId, text, method, itemId, createdAt: message.event.createdAt, role, eventType: message.event.type, logType, progressState: message.event.payload?.progressState })
       } catch { /* Ignore non-JSON socket messages. */ }
     }
-    return () => socket.close()
+    return () => {
+      socket.close()
+      if (liveEventFrame.current !== null) window.cancelAnimationFrame(liveEventFrame.current)
+      liveEventFrame.current = null
+      pendingLiveEvents.current = []
+    }
   }, [])
 
   useEffect(() => {
@@ -650,13 +694,17 @@ function App() {
     browseDirectory()
   }
 
-  const loadEnvironment = () => {
+  const loadEnvironment = (source?: unknown) => {
+    const installingTool = source === 'codex' || source === 'claude' ? source : undefined
     setEnvironmentLoading(true)
     setEnvironmentError('')
     void fetch('/api/environment').then(async response => {
       const body = await response.json() as { tools?: EnvironmentItem[]; requirements?: EnvironmentItem[]; error?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to inspect this Mac')
       setEnvironment({ tools: body.tools ?? [], requirements: body.requirements ?? [] })
+      if (installingTool && body.tools?.some(tool => tool.id === installingTool && tool.status === 'installing')) {
+        window.setTimeout(() => loadEnvironment(installingTool), 1_000)
+      }
     }).catch(error => setEnvironmentError(error instanceof Error ? error.message : 'Unable to inspect this Mac')).finally(() => setEnvironmentLoading(false))
   }
 
@@ -666,7 +714,7 @@ function App() {
       const body = await response.json() as { error?: string; message?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to start installation')
       notify(body.message ?? 'Installation started')
-      window.setTimeout(loadEnvironment, 1_000)
+      window.setTimeout(() => loadEnvironment(tool), 1_000)
     }).catch(error => setEnvironmentError(error instanceof Error ? error.message : 'Unable to start installation'))
   }
 
@@ -741,7 +789,7 @@ function App() {
     <header className="topbar">
       <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span></div>
       <div className="topbar-center"><span className="connection-dot" /> {machineName} <ChevronDown size={14} /></div>
-      {rateLimit && <div className="topbar-token" title={`Codex 5-hour quota resets in ${formatCountdown(resetInSeconds)}`}><span>5h</span><strong>{rateLimit.primary.usedPercent}%</strong><i><b style={{ width: `${rateLimit.primary.usedPercent}%` }} /></i><em>↻ {formatCountdown(resetInSeconds)}</em>{rateLimit.secondary && <><span className="quota-week">7d</span><strong>{rateLimit.secondary.usedPercent}%</strong></>}</div>}
+      {rateLimit && <RateLimitStatus rateLimit={rateLimit} />}
       <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu"><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={playCompletionTone} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
     </header>
 
@@ -763,10 +811,10 @@ function App() {
         <div className="section-heading recent-task-heading"><div><span className="eyebrow">{text.projectActivity}</span><h2>{text.recentTasks}<span className="active-task-count"><span className="pulse" />{tasks.filter(task => task.state === 'running').length} {language === 'zh' ? '运行中' : 'running'}</span></h2></div><div className="recent-task-controls"><label className="recent-task-select-label"><span className="sr-only">{text.recentTasks}</span><select className="recent-task-select" value={tasks[activeTask] ? String(activeTask) : ''} onChange={event => { const index = Number(event.target.value); if (Number.isInteger(index)) activateTask(index) }} aria-label={text.recentTasks}><option value="" disabled>{language === 'zh' ? '选择任务' : 'Select a task'}</option>{taskSelectOptions.map(({ task, index, selected }) => <option key={`${task.id}-${index}`} value={index}>{selected ? (language === 'zh' ? '已选择 · ' : 'Selected · ') : `${statusLabel(task.state)} · `}{task.title}</option>)}</select><ChevronDown size={14} /></label><button className={`filter ${taskSearchOpen ? 'active' : ''}`} onClick={() => setTaskSearchOpen(current => !current)} aria-label={text.searchTasks} title={text.searchTasks}><Search size={15} /><span>{text.searchTasks}</span></button></div></div>
         {taskSearchOpen && <div className="task-search"><Search size={15} /><input autoFocus value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder={text.searchTasks} /><button onClick={() => { setTaskQuery(''); setTaskSearchOpen(false) }} aria-label="Close search"><X size={15} /></button></div>}
         <div className="task-preview-workspace" ref={executionWorkspaceRef}>
-            {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={() => setExecutionLogsCollapsed(true)} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={() => setExecutionLogsCollapsed(true)} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
+            {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={collapseExecutionLogs} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={collapseExecutionLogs} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
             <div className="task-preview">
             <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3>{tasks[activeTask].title}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
-            <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><span className="task-duration">{language === 'zh' ? '用时' : 'Duration'} {formatTaskDuration(tasks[activeTask])}</span></div>
+            <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><TaskDuration task={tasks[activeTask]} language={language} /></div>
             {(tasks[activeTask].pendingApprovals ?? []).map(approval => <ApprovalCard key={approval.id} approval={approval} language={language} onRespond={response => respondToApproval(tasks[activeTask], approval.id, response)} />)}
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} />
             {tasks[activeTask].agent === 'Codex' && reasoningOptions.length > 0 && <div className="reasoning-control"><label htmlFor="turn-effort">Reasoning level</label><select id="turn-effort" value={selectedEffort} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onChange={event => changeTaskEffort(event.target.value)} title={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' ? 'The current turn is already using its selected level' : 'Choose a reasoning level for the next turn'}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select><span>Applies to the next turn</span></div>}
