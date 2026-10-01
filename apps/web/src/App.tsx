@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import {
   Archive, ChevronDown, ChevronRight,
   Code2, FolderGit2, Laptop, Menu, MessageSquare, MoreHorizontal,
-  Plus, Search, Settings, Sparkles, Square, TerminalSquare, Trash2, X, Zap,
+  Maximize2, Minimize2, Plus, Search, Settings, Sparkles, Square, TerminalSquare, Trash2, X, Zap,
 } from 'lucide-react'
 import { apiAgentService, getTaskTokenUsage, listCodexModels, listTaskEvents, listTaskHistory, type CodexModel } from './services/apiAgentService'
 import { isExecutionLog, isFinalAssistantMessage, isStreamingDelta, mergeEventSnapshots, mergeSessionTimeline, type TranscriptMessage } from './services/chatTranscript'
@@ -20,6 +20,7 @@ type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; reset
 type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null }
 type EnvironmentItem = { id?: 'codex' | 'claude'; label: string; installed: boolean; version?: string; status?: 'installing' | 'failed'; detail?: string }
 type CompletionSound = 'chime' | 'bell' | 'digital'
+const CODEX_MODEL_REFRESH_MS = 24 * 60 * 60 * 1_000
 
 function formatTime(timestamp: string) {
   return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestamp))
@@ -210,6 +211,7 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTask, setActiveTask] = useState(0)
+  const [taskMaximized, setTaskMaximized] = useState(false)
   const [executionLogsCollapsed, setExecutionLogsCollapsed] = useState(() => window.innerWidth <= 1024)
   const collapseExecutionLogs = useCallback(() => setExecutionLogsCollapsed(true), [])
   const [executionLogWidth, setExecutionLogWidth] = useState(() => {
@@ -224,6 +226,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 650)
   const [projectsExpanded, setProjectsExpanded] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const settingsMenuRef = useRef<HTMLDivElement>(null)
   const [readingSize, setReadingSize] = useState<'small' | 'medium' | 'large'>(() => (localStorage.getItem('relay-reading-size') as 'small' | 'medium' | 'large') || 'medium')
   const [language, setLanguage] = useState<'en' | 'zh'>(() => (localStorage.getItem('relay-language') as 'en' | 'zh') || 'en')
   const [completionSoundEnabled, setCompletionSoundEnabled] = useState(() => localStorage.getItem('relay-completion-sound') !== 'false')
@@ -252,6 +255,10 @@ function App() {
   const [models, setModels] = useState<CodexModel[]>([])
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('relay-codex-model') || '')
   const [selectedEffort, setSelectedEffort] = useState(() => localStorage.getItem('relay-codex-effort') || '')
+  const selectedModelRef = useRef(selectedModel)
+  const selectedEffortRef = useRef(selectedEffort)
+  const modelsLoaded = useRef(false)
+  const modelsRefreshAt = useRef<number | null>(null)
   const [notice, setNotice] = useState('')
   const [liveEvents, setLiveEvents] = useState<TranscriptMessage[]>([])
   const pendingLiveEvents = useRef<TranscriptMessage[]>([])
@@ -278,6 +285,26 @@ function App() {
   const transcriptLoadRequest = useRef(0)
   tasksRef.current = tasks
   activeTaskRef.current = activeTask
+  selectedModelRef.current = selectedModel
+  selectedEffortRef.current = selectedEffort
+
+  useEffect(() => {
+    if (!settingsOpen) return
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !settingsMenuRef.current?.contains(event.target)) setSettingsOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick)
+  }, [settingsOpen])
+
+  useEffect(() => {
+    if (!taskMaximized) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTaskMaximized(false)
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [taskMaximized])
 
   const getExecutionLogWidthAt = (clientX: number) => {
     const workspace = executionWorkspaceRef.current
@@ -442,19 +469,49 @@ function App() {
     setSelectedEffort(selectedModelInfo.defaultReasoningEffort ?? reasoningOptions[0]?.reasoningEffort ?? '')
   }, [selectedModelInfo, selectedEffort, reasoningOptions])
   useEffect(() => {
-    void listCodexModels().then(available => {
-      setModels(available)
-      const stored = localStorage.getItem('relay-codex-model')
-      const activeTask = tasksRef.current[activeTaskRef.current]
-      const taskModel = activeTask?.model && available.some(model => model.model === activeTask.model) ? activeTask.model : ''
-      const preferred = taskModel || (stored && available.some(model => model.model === stored) ? stored : available.find(model => model.isDefault)?.model ?? available[0]?.model ?? '')
-      setSelectedModel(preferred)
-      const selected = available.find(model => model.model === preferred)
-      const supported = selected?.supportedReasoningEfforts ?? []
-      const storedEffort = localStorage.getItem('relay-codex-effort')
-      const taskEffort = activeTask?.reasoningEffort && supported.some(option => option.reasoningEffort === activeTask.reasoningEffort) ? activeTask.reasoningEffort : ''
-      setSelectedEffort(taskEffort || (storedEffort && supported.some(option => option.reasoningEffort === storedEffort) ? storedEffort : selected?.defaultReasoningEffort ?? supported[0]?.reasoningEffort ?? ''))
-    }).catch(() => undefined)
+    let cancelled = false
+    const refreshModels = async () => {
+      try {
+        const available = await listCodexModels()
+        if (cancelled) return
+        const initialLoad = !modelsLoaded.current
+        const activeTask = tasksRef.current[activeTaskRef.current]
+        const taskModel = activeTask?.model && available.some(model => model.model === activeTask.model) ? activeTask.model : ''
+        const storedModel = localStorage.getItem('relay-codex-model')
+        const preferred = initialLoad
+          ? taskModel || (storedModel && available.some(model => model.model === storedModel) ? storedModel : '')
+          : selectedModelRef.current && available.some(model => model.model === selectedModelRef.current) ? selectedModelRef.current : taskModel
+        const model = preferred || available.find(item => item.isDefault)?.model || available[0]?.model || ''
+        const selected = available.find(item => item.model === model)
+        const supported = selected?.supportedReasoningEfforts ?? []
+        const storedEffort = localStorage.getItem('relay-codex-effort')
+        const taskEffort = activeTask?.reasoningEffort && supported.some(option => option.reasoningEffort === activeTask.reasoningEffort) ? activeTask.reasoningEffort : ''
+        const currentEffort = selectedEffortRef.current
+        const effort = !initialLoad && currentEffort && supported.some(option => option.reasoningEffort === currentEffort)
+          ? currentEffort
+          : taskEffort || (storedEffort && supported.some(option => option.reasoningEffort === storedEffort) ? storedEffort : selected?.defaultReasoningEffort ?? supported[0]?.reasoningEffort ?? '')
+
+        modelsLoaded.current = true
+        modelsRefreshAt.current = Date.now()
+        setModels(available)
+        setSelectedModel(model)
+        setSelectedEffort(effort)
+      } catch {
+        // Keep the last known list and retry on the next scheduled refresh.
+      }
+    }
+    const refreshIfStale = () => {
+      if (modelsRefreshAt.current === null || Date.now() - modelsRefreshAt.current >= CODEX_MODEL_REFRESH_MS) void refreshModels()
+    }
+
+    void refreshModels()
+    const timer = window.setInterval(refreshIfStale, CODEX_MODEL_REFRESH_MS)
+    window.addEventListener('focus', refreshIfStale)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshIfStale)
+    }
   }, [])
   useEffect(() => {
     const runningTasks = tasks.filter(task => task.state === 'running').length
@@ -785,12 +842,12 @@ function App() {
   if (!localProject) return <div className="loading-screen"><div className="empty-home"><FolderGit2 size={24} /><h1>Choose a local project</h1><p>Select a Git repository to load its local Codex session history.</p><button className="primary-btn" onClick={openProjectPicker}><Plus size={16} /> Choose project</button></div>{projectPickerOpen && <div className="modal-backdrop" onClick={() => setProjectPickerOpen(false)}><div className="modal project-picker" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">LOCAL PROJECT</span><h2>Choose a Git repository</h2></div><button className="icon-btn" onClick={() => setProjectPickerOpen(false)}><X size={18} /></button></div><p className="picker-path">{directory?.path ?? 'Loading…'}</p>{directory?.parent && <button className="parent-directory" onClick={() => browseDirectory(directory.parent ?? undefined)}>← Parent folder</button>}{projectPickerError && <p className="picker-error">{projectPickerError}</p>}<div className="directory-list">{directory?.items.map(item => <div className="directory-row" key={item.path}><button className="directory-open" onClick={() => browseDirectory(item.path)}><FolderGit2 size={16} /><span>{item.name}</span>{item.isGit && <small>Git repository</small>}</button>{item.isGit && <button className="secondary-btn" onClick={() => selectProject(item.path)}>Select</button>}</div>)}</div><p className="picker-hint">Choose a Git repository to load its local Codex session history.</p></div></div>}</div>
   if (tasks.length === 0) return <div className="loading-screen"><div className="empty-home"><Sparkles size={24} /><h1>No local Codex sessions yet</h1><p>Create a task to start a session in {localProject.name}.</p><button className="primary-btn" onClick={() => setNewTaskOpen(true)}><Plus size={16} /> Start a task</button>{newTaskOpen && <div className="modal-backdrop" onClick={() => setNewTaskOpen(false)}><div className="modal" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">NEW SESSION</span><h2>Start a task</h2></div><button className="icon-btn" onClick={() => setNewTaskOpen(false)}><X size={18} /></button></div><label>Agent<select value={newTaskAgent} onChange={event => setNewTaskAgent(event.target.value as AgentName)}><option>Codex</option><option disabled>Claude (coming soon)</option></select></label>{newTaskAgent === 'Codex' && <><label>Model<select value={selectedModel} disabled={!models.length} onChange={event => setSelectedModel(event.target.value)}>{models.map(model => <option key={model.model} value={model.model}>{model.displayName || model.model}</option>)}</select></label><label>Reasoning level<select value={selectedEffort} disabled={!reasoningOptions.length} onChange={event => setSelectedEffort(event.target.value)}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select></label></>}<label>Task<textarea autoFocus value={newTaskTitle} onChange={event => setNewTaskTitle(event.target.value)} placeholder="Describe what you want Codex to do…" /></label><div className="modal-actions"><button className="secondary-btn" onClick={() => setNewTaskOpen(false)}>Cancel</button><button className="primary-btn" onClick={createTask}><Zap size={15} /> Start task</button></div></div></div>}</div></div>
 
-  return <div className={`app-shell reading-${readingSize}`}>
+  return <div className={`app-shell reading-${readingSize}${taskMaximized ? ' task-maximized' : ''}${sidebarOpen ? '' : ' sidebar-collapsed'}`}>
     <header className="topbar">
       <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span></div>
       <div className="topbar-center"><span className="connection-dot" /> {machineName} <ChevronDown size={14} /></div>
       {rateLimit && <RateLimitStatus rateLimit={rateLimit} />}
-      <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu"><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={playCompletionTone} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
+      <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu" ref={settingsMenuRef}><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={playCompletionTone} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
     </header>
 
     <div className="workspace">
@@ -804,16 +861,16 @@ function App() {
       </aside>
       {sidebarOpen && <button className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} aria-label="Close workspace menu" />}
 
-      <main className="main-content">
+      <main className={`main-content ${activeView === 'projects' ? `project-main-content${taskMaximized ? ' task-maximized' : ''}` : ''}`}>
         {activeView === 'overview' ? <section className="environment-page"><div className="content-header"><div className="breadcrumbs"><span className="muted">{text.overview}</span><ChevronRight size={14} /><strong>Local environment</strong></div><button className="secondary-btn" onClick={loadEnvironment}>Refresh</button></div><section className="project-hero"><div><span className="eyebrow">LOCAL AGENT SETUP</span><h1>Codex & Claude environment</h1><p className="path">Inspect the tools Relay uses on this Mac. Installation runs only when you choose it.</p></div></section>{environmentLoading && !environment ? <p className="environment-loading">Checking local tools…</p> : <><div className="environment-grid">{environment?.tools.map(tool => <article className="environment-card" key={tool.id}><div><span className="eyebrow">AI CODING AGENT</span><h2>{tool.label}</h2><p>{tool.installed ? tool.version ?? 'Installed' : 'Not installed'}</p></div><span className={`environment-status ${tool.status ?? (tool.installed ? 'installed' : 'missing')}`}>{tool.status === 'installing' ? 'Installing' : tool.status === 'failed' ? 'Failed' : tool.installed ? 'Ready' : 'Missing'}</span>{tool.status === 'failed' && <small className="environment-error">{tool.detail}</small>}<button className={tool.installed ? 'secondary-btn' : 'primary-btn'} disabled={tool.status === 'installing'} onClick={() => !tool.installed && tool.id && installTool(tool.id)}>{tool.status === 'installing' ? 'Installing…' : tool.installed ? 'Installed' : `Install ${tool.label}`}</button></article>)}</div><section className="environment-requirements"><span className="eyebrow">REQUIREMENTS</span>{environment?.requirements.map(item => <div key={item.label}><span>{item.label}</span><strong className={item.installed ? 'ok' : 'missing'}>{item.installed ? item.version ?? 'Ready' : 'Missing'}</strong></div>)}</section><p className="environment-note">After installation, sign in in a local terminal with <code>codex login</code> or <code>claude login</code>. Relay does not store your credentials.</p>{environmentError && <p className="environment-error">{environmentError}</p>}</>}</section> : activeView === 'activity' ? <section className="activity-page"><div className="content-header"><div className="breadcrumbs"><span className="muted">{text.workspace}</span><ChevronRight size={14} /><strong>{text.activity}</strong></div><button className="secondary-btn" onClick={() => setActivityRefresh(value => value + 1)}>Refresh</button></div><section className="project-hero"><div><span className="eyebrow">LOCAL SESSION FEED</span><h1>{text.activity}</h1><p className="path">Recent messages across tasks in {localProject?.name ?? 'this project'}.</p></div></section>{activityLoading ? <p className="environment-loading">Loading activity…</p> : activityEvents.length ? <div className="activity-feed">{activityEvents.map((event, index) => <article className={`activity-item ${event.role}`} key={`${event.taskId}-${event.createdAt}-${index}`}><div className="activity-marker"><MessageSquare size={15} /></div><div className="activity-body"><div className="activity-meta"><strong>{event.role === 'user' ? 'You' : event.role === 'progress' ? 'Codex activity' : 'Codex'}</strong><time>{formatTime(event.createdAt)}</time></div><button className="activity-task-link" onClick={() => { const index = tasks.findIndex(task => task.id === event.taskId); if (index >= 0) { setActiveTask(index); setActiveView('projects') } }}>{event.taskTitle}</button><div className="markdown-output"><ReactMarkdown remarkPlugins={[remarkGfm]}>{event.text}</ReactMarkdown></div></div></article>)}</div> : <div className="empty-tasks">No task messages yet.</div>}</section> : <>
-        <div className="content-header"><div className="breadcrumbs"><span className="muted">{text.projects}</span><ChevronRight size={14} /><strong>{localProject?.name ?? 'Local project'}</strong></div><div className="header-actions"><button className="secondary-btn" onClick={() => notify('Raw terminal needs the SSH terminal endpoint, which is not enabled yet')}><TerminalSquare size={15} /> Open terminal</button><button className="primary-btn" onClick={() => setNewTaskOpen(true)}><Plus size={16} /> {text.newTask}</button></div></div>
-        <section className="project-hero"><div><div className="hero-title"><h1>{localProject?.name ?? 'Local project'}</h1><span className="repo-pill"><FolderGit2 size={13} /> Git repository</span></div><p className="path">{localProject?.path ?? ''}</p></div><div className="branch"><span className="branch-icon">⌘</span> {localProject?.branch ?? '—'} <span className="clean-dot" /> {localProject?.clean ? 'Clean' : 'Changed'}</div></section>
+        <div className="content-header project-content-header"><div className="breadcrumbs"><span className="muted">{text.projects}</span><ChevronRight size={14} /><strong>{localProject?.name ?? 'Local project'}</strong></div><div className="header-actions"><button className="secondary-btn" onClick={() => notify('Raw terminal needs the SSH terminal endpoint, which is not enabled yet')}><TerminalSquare size={15} /> Open terminal</button><button className="primary-btn" onClick={() => setNewTaskOpen(true)}><Plus size={16} /> {text.newTask}</button></div></div>
+        <section className="project-hero project-page-hero"><div><div className="hero-title"><h1>{localProject?.name ?? 'Local project'}</h1><span className="repo-pill"><FolderGit2 size={13} /> Git repository</span></div><p className="path">{localProject?.path ?? ''}</p></div><div className="branch"><span className="branch-icon">⌘</span> {localProject?.branch ?? '—'} <span className="clean-dot" /> {localProject?.clean ? 'Clean' : 'Changed'}</div></section>
         <div className="section-heading recent-task-heading"><div><span className="eyebrow">{text.projectActivity}</span><h2>{text.recentTasks}<span className="active-task-count"><span className="pulse" />{tasks.filter(task => task.state === 'running').length} {language === 'zh' ? '运行中' : 'running'}</span></h2></div><div className="recent-task-controls"><label className="recent-task-select-label"><span className="sr-only">{text.recentTasks}</span><select className="recent-task-select" value={tasks[activeTask] ? String(activeTask) : ''} onChange={event => { const index = Number(event.target.value); if (Number.isInteger(index)) activateTask(index) }} aria-label={text.recentTasks}><option value="" disabled>{language === 'zh' ? '选择任务' : 'Select a task'}</option>{taskSelectOptions.map(({ task, index, selected }) => <option key={`${task.id}-${index}`} value={index}>{selected ? (language === 'zh' ? '已选择 · ' : 'Selected · ') : `${statusLabel(task.state)} · `}{task.title}</option>)}</select><ChevronDown size={14} /></label><button className={`filter ${taskSearchOpen ? 'active' : ''}`} onClick={() => setTaskSearchOpen(current => !current)} aria-label={text.searchTasks} title={text.searchTasks}><Search size={15} /><span>{text.searchTasks}</span></button></div></div>
         {taskSearchOpen && <div className="task-search"><Search size={15} /><input autoFocus value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder={text.searchTasks} /><button onClick={() => { setTaskQuery(''); setTaskSearchOpen(false) }} aria-label="Close search"><X size={15} /></button></div>}
         <div className="task-preview-workspace" ref={executionWorkspaceRef}>
             {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={collapseExecutionLogs} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={collapseExecutionLogs} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
             <div className="task-preview">
-            <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3>{tasks[activeTask].title}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
+            <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3>{tasks[activeTask].title}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={() => setTaskMaximized(current => !current)} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
             <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><TaskDuration task={tasks[activeTask]} language={language} /></div>
             {(tasks[activeTask].pendingApprovals ?? []).map(approval => <ApprovalCard key={approval.id} approval={approval} language={language} onRespond={response => respondToApproval(tasks[activeTask], approval.id, response)} />)}
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} />

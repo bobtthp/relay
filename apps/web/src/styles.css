@@ -100,8 +100,8 @@
 
 @media (min-width: 901px) { .task-layout.tasks-collapsed { grid-template-columns:minmax(0, 1fr); } .tasks-collapsed .task-list { grid-template-columns:repeat(auto-fit, minmax(48px, 1fr)); } .tasks-collapsed .task-card { padding:10px; justify-content:center; } .tasks-collapsed .task-copy, .tasks-collapsed .task-state, .tasks-collapsed .task-chevron { display:none; } .tasks-collapsed .task-agent { width:28px; height:28px; } }
 
-.reading-small .markdown-output { font-size:11px; } .reading-small .live-output pre { font-size:10px; } .reading-small .preview-event p { font-size:10px; }
-.reading-large .markdown-output { font-size:14px; } .reading-large .live-output pre { font-size:13px; } .reading-large .preview-event p { font-size:13px; } .reading-large .task-copy strong { font-size:14px; } .reading-large .task-copy span { font-size:11px; } .reading-large .composer textarea { font-size:14px; }
+.reading-small .markdown-output { font-size:12px; } .reading-small .live-output pre { font-size:11px; } .reading-small .preview-event p { font-size:11px; }
+.reading-large .markdown-output { font-size:16px; } .reading-large .live-output pre { font-size:15px; } .reading-large .preview-event p { font-size:15px; } .reading-large .preview-event strong { font-size:13px; } .reading-large .task-copy strong { font-size:15px; } .reading-large .task-copy span { font-size:13px; } .reading-large .composer textarea { font-size:16px; } .reading-large .nav-item, .reading-large .primary-btn, .reading-large .secondary-btn { font-size:14px; } .reading-large .eyebrow, .reading-large .stat-label { font-size:12px; }
 
 .live-history-toggle { display:block; width:100%; margin-top:13px; padding:9px 12px; border:1px solid #29333a; border-radius:6px; background:#111820; color:#94a4b3; text-align:left; font:10px 'DM Mono', monospace; }
 .live-history-toggle:hover { border-color:#4a5870; color:#d3dce5; background:#151e28; }
@@ -301,6 +301,41 @@
 .selected-task-delete { width:30px; height:30px; flex:0 0 auto; color:#929bab; }
 .selected-task-delete:hover:not(:disabled) { color:#f09a9a; border-color:#71434a; }
 .selected-task-delete:disabled { opacity:.4; cursor:not-allowed; }
+
+.project-content-header { margin-bottom:14px; }
+.project-content-header .breadcrumbs { font-size:11px; }
+.project-page-hero { padding-bottom:18px; }
+.project-page-hero h1 { margin:8px 0 5px; font-size:26px; }
+.project-page-hero .path { font-size:10px; }
+.recent-task-heading { margin-bottom:8px; }
+.task-preview-workspace > .task-preview { height:100%; }
+.execution-log-sidebar { height:100%; }
+
+@media (max-width:650px) {
+  .project-content-header { margin-bottom:10px; }
+  .project-page-hero { padding-bottom:13px; }
+  .project-page-hero h1 { font-size:22px; }
+  .project-page-hero .path { font-size:9px; }
+  .task-preview-workspace > .task-preview { height:100%; }
+}
+.project-main-content { display:flex; flex-direction:column; height:calc(100dvh - 64px); min-height:0; padding-bottom:24px; }
+.project-main-content > .project-content-header,
+.project-main-content > .project-page-hero,
+.project-main-content > .recent-task-heading { flex:0 0 auto; }
+.project-main-content .task-preview-workspace { flex:1 1 0; min-height:0; }
+@media (max-width:650px) {
+  .project-main-content { height:calc(100dvh - 58px); padding-bottom:calc(28px + env(safe-area-inset-bottom)); }
+}
+.project-main-content.task-maximized { position:fixed; z-index:20; inset:64px 0 0 254px; width:auto; max-width:none; height:auto; margin:0; padding:14px 22px 18px; background:var(--bg); transition:left .2s ease; }
+.app-shell.task-maximized .topbar { z-index:24; }
+.project-main-content.task-maximized > .project-content-header,
+.project-main-content.task-maximized > .project-page-hero,
+.project-main-content.task-maximized > .recent-task-heading,
+.project-main-content.task-maximized > .task-search { display:none; }
+.task-maximize-toggle { display:grid; place-items:center; width:30px; height:30px; flex:0 0 auto; border:1px solid #303846; border-radius:6px; background:#171c25; color:#aab2c0; }
+.task-maximize-toggle:hover { border-color:#51447f; color:#dcd5ff; background:#211c33; }
+@media (max-width:900px) { .project-main-content.task-maximized { left:220px; } }
+@media (min-width:651px) { .app-shell.sidebar-collapsed .project-main-content.task-maximized { left:62px; } }
 @media (max-width:650px) {
   .recent-task-heading { align-items:center; gap:6px; }
   .recent-task-heading h2 { gap:5px; font-size:14px; }
@@ -309,6 +344,9 @@
   .recent-task-controls .filter { width:32px; min-width:32px; height:32px; }
   .task-preview { padding:11px 10px 10px; }
   .preview-agent { padding:6px 0; }
+}
+@media (max-width:650px) {
+  .project-main-content.task-maximized { inset:58px 0 0; width:100%; padding:10px 12px calc(14px + env(safe-area-inset-bottom)); }
 }
 .task-delete { flex:0 0 38px; display:grid; place-items:center; border:1px solid #282f3b; border-radius:8px; color:#7d8797; background:#121720; }
 
@@ -462,17 +500,17 @@ fieldset.approval-field { padding:10px; border:1px solid #51452d; border-radius:
 :root {
   --font-ui: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
   --font-code: 'DM Mono', ui-monospace, SFMono-Regular, monospace;
-  --type-body: 13px;
-  --type-control: 12px;
-  --type-caption: 11px;
-  --type-reading: 13px;
+  --type-body: 14px;
+  --type-control: 13px;
+  --type-caption: 12px;
+  --type-reading: 14px;
 }
 body { font-family:var(--font-ui); font-size:var(--type-body); }
 button, input, select, textarea { font-family:var(--font-ui); font-size:var(--type-control); }
 .model-select, .reasoning-control select, .sound-style select { font-family:var(--font-ui); font-size:var(--type-control); }
 .project small, .task-copy span, .machine-status, .stat-hint, .event-time,
 .activity-meta time, .activity-task-link { font-size:var(--type-caption); }
-.app-shell.reading-small { --type-reading:12px; }
-.app-shell.reading-large { --type-reading:15px; }
+.app-shell.reading-small { --type-reading:13px; }
+.app-shell.reading-large { --type-body:16px; --type-control:15px; --type-caption:13px; --type-reading:18px; }
 .app-shell .session-message .message-markdown,
 .app-shell .activity-body .markdown-output { font-size:var(--type-reading); }
