@@ -3,16 +3,16 @@
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/bobtthp/relay"
-  url "https://github.com/bobtthp/relay/releases/download/v0.1.7/relay-0.1.7.tar.gz"
-  sha256 "f1ef5578eb380665652a3369890a382c2101fcfb89f8a3d72b846d855e734940"
+  url "https://github.com/bobtthp/relay/releases/download/v0.1.8/relay-0.1.8.tar.gz"
+  sha256 "79cd0bb4866e24a60a5a7240400ee162feb70b4bbf729e3281b955d72d10d96a"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.7"
-    sha256 cellar: :any, arm64_tahoe:   "499d4941d571fb0f5de753b8e8fc5858202d9b48861aeac9dbb49f0194df4734"
-    sha256 cellar: :any, arm64_sequoia: "e9958eca421296f27ccf99a58e0be0d8ebff28b1cf4618ed792f2c9bb94feb33"
-    sha256 cellar: :any, tahoe:         "5af319d4475912e0ef66a7179fa8f135a7f1847c624df0ef3635cbe883f4501d"
-    sha256 cellar: :any, sequoia:       "0541def8664fca0f4fce7eed02f78ab758f6c0f82351cf84e75672b3a2fad3ef"
+    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.8"
+    sha256 cellar: :any, arm64_tahoe:   "5286709c4a56d577139aaf7d745cdd26a74a301d76aaf6024ca883fc4137c945"
+    sha256 cellar: :any, arm64_sequoia: "2222d2d067b43e6d01dbe45a06c2c25fe56793825ec2b44869f1addb1373112b"
+    sha256 cellar: :any, tahoe:         "b8c09cc7e864c1729a46e24b7e90dc0cd97475b95caa89167ac7b161376a7474"
+    sha256 cellar: :any, sequoia:       "7be37513122d349dc0ca938fd30f84fd55ce082abf230cdd13677c4f21dd3a93"
   end
 
   depends_on "node@22"
@@ -27,6 +27,23 @@ class Relay < Formula
 
   def post_install
     (var/"log").mkpath
+    require "securerandom"
+    require "socket"
+    token_path = Pathname.new(Dir.home)/".relay-web"/"auth-token"
+    unless token_path.exist?
+      token_path.dirname.mkpath
+      token_path.write(SecureRandom.hex(32))
+      token_path.chmod(0600)
+    end
+    puts "Relay uses port 3000 and is protected by a local access token."
+    puts "Start the background service with: brew services start bobtthp/relay/relay"
+    puts "On this Mac: http://127.0.0.1:3000"
+    lan_addresses = Socket.ip_address_list.filter_map do |address|
+      address.ip_address if address.ipv4? && !address.ipv4_loopback?
+    end.uniq
+    lan_addresses.each { |address| puts "On this local network: http://#{address}:3000" }
+    puts "Access token: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
+    opoo "Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router."
   end
 
   service do
@@ -35,7 +52,7 @@ class Relay < Formula
     working_dir opt_libexec
     environment_variables PATH: std_service_path_env,
                           PORT: "3000",
-                          RELAY_HOST: "127.0.0.1"
+                          RELAY_HOST: "0.0.0.0"
     log_path var/"log/relay.log"
     error_log_path var/"log/relay-error.log"
     name macos: "dev.relay.agent"
