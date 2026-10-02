@@ -1,5 +1,5 @@
-# The release workflow renders this template to Formula/relay.rb in the source
-# repository after calculating the versioned release archive checksum.
+# The release workflow renders this template, builds macOS bottles, and adds
+# their checksums before committing Formula/relay.rb to the source repository.
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/@@GITHUB_OWNER@@/@@GITHUB_REPOSITORY@@"

@@ -8,8 +8,12 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  source:
     runs-on: ubuntu-latest
+    outputs:
+      archive: ${{ steps.package.outputs.archive }}
+      version: ${{ steps.package.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -36,25 +40,139 @@ jobs:
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "sha256=$(cut -d ' ' -f 1 "${ARCHIVE}.sha256")" >> "$GITHUB_OUTPUT"
-      - name: Update Homebrew formula
+      - name: Create draft release
         env:
-          VERSION: ${{ steps.package.outputs.version }}
-          SHA256: ${{ steps.package.outputs.sha256 }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.archive }}.sha256" \
+            --draft \
+            --title "Relay ${GITHUB_REF_NAME#v}" \
+            --generate-notes
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-source
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  bottle:
+    needs: source
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel, macos-26, macos-26-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: relay-source
+          path: ${{ runner.temp }}/source
+      - name: Create tap formula and build bottle
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+          ARCHIVE: ${{ needs.source.outputs.archive }}
+          SHA256: ${{ needs.source.outputs.sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         shell: bash
         run: |
+          set -euo pipefail
+          SOURCE_ARCHIVE="$RUNNER_TEMP/source/$ARCHIVE"
+          SOURCE_URL="file://$SOURCE_ARCHIVE"
+          brew tap-new --no-git relay/ci
+          TAP_DIR="$(brew --repository)/Library/Taps/relay/homebrew-ci"
+          FORMULA_PATH="$TAP_DIR/Formula/relay.rb"
+          export SOURCE_URL FORMULA_PATH
+
+          ruby -e '
+            require "json"
+            template = File.read("deploy/homebrew/relay.release.rb.template")
+            values = {
+              "@@GITHUB_OWNER@@" => ENV.fetch("REPOSITORY").split("/").first,
+              "@@GITHUB_REPOSITORY@@" => ENV.fetch("REPOSITORY").split("/").last,
+              "@@VERSION@@" => ENV.fetch("VERSION"),
+              "@@SHA256@@" => ENV.fetch("SHA256")
+            }
+            values.each { |placeholder, value| template.gsub!(placeholder, value) }
+            template.sub!(%r{url "https://github.com/[^\"]+"}, "url #{ENV.fetch("SOURCE_URL").to_json}")
+            abort "Unexpanded Homebrew formula placeholder" if template.include?("@@")
+            File.write(ENV.fetch("FORMULA_PATH"), template)
+          '
+
+          brew install --build-bottle --formula "$FORMULA_PATH"
+          ROOT_URL="https://github.com/$REPOSITORY/releases/download/$TAG"
+          brew bottle --json --root-url="$ROOT_URL" --force-core-tap "$FORMULA_PATH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-bottle-${{ matrix.runner }}
+          path: |
+            *.bottle.tar.gz
+            *.bottle.json
+          if-no-files-found: error
+
+  publish:
+    needs: [source, bottle]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: relay-bottle-*
+          path: ${{ runner.temp }}/bottles
+          merge-multiple: true
+      - name: Merge bottle metadata into the release formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.source.outputs.version }}
+          ARCHIVE: ${{ needs.source.outputs.archive }}
+          SHA256: ${{ needs.source.outputs.sha256 }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git relay/ci
+          TAP_DIR="$(brew --repository)/Library/Taps/relay/homebrew-ci"
+          FORMULA_PATH="$TAP_DIR/Formula/relay.rb"
+          export FORMULA_PATH
+
           ruby -e '
             template = File.read("deploy/homebrew/relay.release.rb.template")
             values = {
-              "@@GITHUB_OWNER@@" => ENV.fetch("GITHUB_REPOSITORY_OWNER"),
-              "@@GITHUB_REPOSITORY@@" => ENV.fetch("GITHUB_REPOSITORY").split("/").last,
+              "@@GITHUB_OWNER@@" => ENV.fetch("REPOSITORY").split("/").first,
+              "@@GITHUB_REPOSITORY@@" => ENV.fetch("REPOSITORY").split("/").last,
               "@@VERSION@@" => ENV.fetch("VERSION"),
               "@@SHA256@@" => ENV.fetch("SHA256")
             }
             values.each { |placeholder, value| template.gsub!(placeholder, value) }
             abort "Unexpanded Homebrew formula placeholder" if template.include?("@@")
-            File.write(File.join(ENV.fetch("RUNNER_TEMP"), "relay.rb"), template)
+            File.write(ENV.fetch("FORMULA_PATH"), template)
           '
+
+          shopt -s nullglob
+          JSON_FILES=("$RUNNER_TEMP"/bottles/*.bottle.json)
+          BOTTLE_FILES=("$RUNNER_TEMP"/bottles/*.bottle.tar.gz)
+          if (( ${#JSON_FILES[@]} != 4 || ${#BOTTLE_FILES[@]} != 4 )); then
+            echo "Expected four macOS bottle archives and metadata files" >&2
+            exit 1
+          fi
+          brew bottle --merge --write --no-commit --no-all-checks "${JSON_FILES[@]}"
+
+          cp "$FORMULA_PATH" "$RUNNER_TEMP/relay.rb"
+          gh release upload "$GITHUB_REF_NAME" "${BOTTLE_FILES[@]}"
+      - name: Publish release and update formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --draft=false
 
           git fetch origin "$DEFAULT_BRANCH"
           git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH"
@@ -64,15 +182,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Formula/relay.rb
           if ! git diff --cached --quiet; then
-            git commit -m "Update Homebrew formula for $VERSION"
+            git commit -m "Update Homebrew formula for ${{ needs.source.outputs.version }}"
             git push origin "HEAD:$DEFAULT_BRANCH"
           fi
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "${{ steps.package.outputs.archive }}" \
-            "${{ steps.package.outputs.archive }}.sha256" \
-            --title "Relay ${GITHUB_REF_NAME#v}" \
-            --generate-notes

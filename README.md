@@ -65,6 +65,10 @@ ownership of its own thread history.
 ## Install as a macOS service
 
 Requirements: macOS, Homebrew, and the Codex CLI signed in with `codex login`.
+The release workflow will publish precompiled bottles for supported Macs, so
+the normal install can download Relay without building it locally. Building
+from source or using an OS/architecture without a published bottle requires
+compatible Command Line Tools.
 
 After the first GitHub Release is published, add the source repository as a
 tap and install Relay:
@@ -93,7 +97,9 @@ brew uninstall bobtthp/relay/relay
 The public tap is not published yet, so these commands will work after the
 tap and first release are available. Maintainers installing from a local
 checkout can use the [local Homebrew guide](deploy/homebrew/README.md). See
-the [LaunchAgent guide](deploy/launchd/README.md) for the alternative setup.
+the [LaunchAgent guide](deploy/launchd/README.md) for the alternative setup,
+which uses an existing local Node.js installation and does not use Homebrew to
+install or manage Relay.
 
 ## Use Relay from a phone or iPad
 

@@ -60,6 +60,9 @@ Relay 状态默认保存在目标仓库之外。Codex 仍负责管理自己的�
 ## 安装为 macOS 服务
 
 需要 macOS、Homebrew 和已登录的 Codex CLI。请先在终端运行 `codex login`。
+发布流程将为受支持的 Mac 提供预编译 bottle，正常安装可直接下载 Relay，无需在本机
+构建。若从源码安装，或当前 macOS/架构没有对应 bottle，则需要兼容的 Command Line
+Tools。
 
 首个 GitHub Release 发布后，先将源码仓库添加为 tap，再安装并启动服务：
 
@@ -86,7 +89,8 @@ brew uninstall bobtthp/relay/relay
 
 公开 tap 尚未发布，因此这些命令要等 tap 和首个版本发布后才能使用。
 维护者从本地源码安装可参考 [Homebrew 本地安装指南](deploy/homebrew/README.md)；
-另一种安装方式见 [LaunchAgent 指南](deploy/launchd/README.md)。
+另一种安装方式见 [LaunchAgent 指南](deploy/launchd/README.md)，它使用本机已有的
+Node.js，不需要 Homebrew 来安装或管理 Relay。
 
 ## 使用手机或 iPad 远程操作
 

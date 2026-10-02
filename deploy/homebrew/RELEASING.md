@@ -14,11 +14,18 @@ git push origin main --tags
 ```
 
 The workflow checks that the tag matches `package.json`, runs the TypeScript
-check and production build, then attaches a source archive and its SHA-256 file
-to a GitHub Release. It also renders
-`deploy/homebrew/relay.release.rb.template` and commits the versioned formula
-to `Formula/relay.rb` on the default branch. The archive excludes local files
-that are not tracked by Git, including `.env` and `node_modules`.
+check and production build, and creates a draft GitHub Release with a source
+archive. It then builds Homebrew bottles for Apple Silicon and Intel on macOS
+15 and macOS 26 runners, uploads them to the release, adds their checksums to
+the rendered `Formula/relay.rb`, commits that formula to the default branch,
+and publishes the release. The source archive excludes local files that are
+not tracked by Git, including `.env` and `node_modules`.
+
+The bottle includes Relay's built UI, server, and Node.js dependencies. Homebrew
+still installs the `node@22` runtime as a bottle dependency; supported Macs do
+not build Relay locally or need Command Line Tools for the Relay formula.
+Systems without a matching bottle may fall back to a source build and require
+Command Line Tools.
 
 ## Installing from this repository
 
