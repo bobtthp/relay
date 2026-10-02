@@ -47,8 +47,16 @@ launchctl bootstrap "gui/$USER_ID" "$PLIST"
 launchctl kickstart -k "gui/$USER_ID/$LABEL"
 printf 'Relay Agent installed and started. On this Mac: http://127.0.0.1:3000\n'
 printf 'On the local network, open http://<Mac-LAN-IP>:3000 and enter the token from: cat ~/.relay-web/auth-token\n'
-printf 'Relay access token (keep it private): '
-cat "$TOKEN_FILE"
+printf '\n>>> RELAY ACCESS TOKEN — KEEP PRIVATE <<<\n'
+if [ -t 1 ]; then
+  printf '\033[1;97;41m  '
+  cat "$TOKEN_FILE"
+  printf '  \033[0m\n'
+else
+  printf '  '
+  cat "$TOKEN_FILE"
+  printf '\n'
+fi
 printf '\n'
 printf 'Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router.\n'
 printf 'LaunchAgent logs: %s\n' "$LOG_DIR"
