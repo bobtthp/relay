@@ -45,6 +45,8 @@ const commandVersion = async (command: string) => {
   } catch { return { installed: false } }
 }
 const loadedProjectIds = new Set<string>()
+const loadedTaskIds = new Set(tasks.map(task => task.id))
+const loadedEventIds = new Set(events.map(event => event.id))
 const hydrateProjectCache = (project: typeof projects[number]) => {
   if (loadedProjectIds.has(project.id)) return
   loadedProjectIds.add(project.id)
@@ -53,12 +55,22 @@ const hydrateProjectCache = (project: typeof projects[number]) => {
   for (const task of cached.tasks) {
     task.projectId = project.id
     if (task.status === 'waiting_for_approval') { task.status = 'interrupted'; task.pendingApprovals = [] }
-    if (!tasks.some(existing => existing.id === task.id)) tasks.push(task)
+    if (!loadedTaskIds.has(task.id)) {
+      tasks.push(task)
+      loadedTaskIds.add(task.id)
+    }
   }
-  for (const event of cached.events) if (!events.some(existing => existing.id === event.id)) events.push(event)
+  for (const event of cached.events) {
+    if (!loadedEventIds.has(event.id)) {
+      events.push(event)
+      loadedEventIds.add(event.id)
+    }
+    eventSequences.set(event.taskId, Math.max(eventSequences.get(event.taskId) ?? 0, event.sequence))
+  }
   for (const sessionId of cached.hiddenCodexSessionIds ?? []) hiddenCodexSessionIds.add(sessionId)
-  for (const event of events) eventSequences.set(event.taskId, Math.max(eventSequences.get(event.taskId) ?? 0, event.sequence))
-  saveProjectCache(project.path, { tasks: tasks.filter(task => task.projectId === project.id), events: events.filter(event => tasks.some(task => task.id === event.taskId && task.projectId === project.id)), hiddenCodexSessionIds: [...hiddenCodexSessionIds] })
+  const projectTasks = tasks.filter(task => task.projectId === project.id)
+  const projectTaskIds = new Set(projectTasks.map(task => task.id))
+  saveProjectCache(project.path, { tasks: projectTasks, events: events.filter(event => projectTaskIds.has(event.taskId)), hiddenCodexSessionIds: [...hiddenCodexSessionIds] })
 }
 for (const project of projects) hydrateProjectCache(project)
 const websocket = new WebSocketServer({ server, path: '/ws', verifyClient: (info: { req: import('node:http').IncomingMessage }) => authorized(info.req.headers) })
