@@ -1,11 +1,19 @@
-# The release workflow renders this template to Formula/relay.rb in the source
-# repository after calculating the versioned release archive checksum.
+# The release workflow renders this template, builds macOS bottles, and adds
+# their checksums before committing Formula/relay.rb to the source repository.
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/bobtthp/relay"
-  url "https://github.com/bobtthp/relay/releases/download/v0.1.3/relay-0.1.3.tar.gz"
-  sha256 "5574c4fd29a4b026b857ec63b473b6e7e0f7c90a5097e06d8078de2b60c35ad1"
+  url "https://github.com/bobtthp/relay/releases/download/v0.1.5/relay-0.1.5.tar.gz"
+  sha256 "e11c8556fd64db5a3373a64043a9c6821b70a5b1a6904bf27135ba397bf17b04"
   license "MIT"
+
+  bottle do
+    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.5"
+    sha256 cellar: :any, arm64_tahoe:   "4c19370d362b007ab414f7d972e9181f411ffa275ac342ea84e78e6a2dec650f"
+    sha256 cellar: :any, arm64_sequoia: "dad82c54fadcc610a554ba501abfdd6c599711412f98b4204bf9cc395bde056d"
+    sha256 cellar: :any, tahoe:         "c9db279b702596e10722a1ba319aea3b010f7691fffb1b277b5296a2595f76e0"
+    sha256 cellar: :any, sequoia:       "a8e5ff8e20574a6be0a8c5519c92c2ff4c2ad5934bb42d76ce5ae159e5e629e4"
+  end
 
   depends_on "node@22"
 
