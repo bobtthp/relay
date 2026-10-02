@@ -3,16 +3,16 @@
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/bobtthp/relay"
-  url "https://github.com/bobtthp/relay/releases/download/v0.1.9/relay-0.1.9.tar.gz"
-  sha256 "88f04d6d52da141fd8b421b285256b454f61e8a6d9690bc86f6b2488a4daf522"
+  url "https://github.com/bobtthp/relay/releases/download/v0.1.10/relay-0.1.10.tar.gz"
+  sha256 "3cdf05fe4104d53dceba09680083ca30f871c17b7fead043bc20ebbfd25df4cb"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.9"
-    sha256 cellar: :any, arm64_tahoe:   "a30660bef22edcb7903e5207c8acd194d12f99b41ba4c7ad36a22928be88aadf"
-    sha256 cellar: :any, arm64_sequoia: "1c820d3c657499bf666ea25f3146b9a4b97def0a9f4416ca547824582caf202e"
-    sha256 cellar: :any, tahoe:         "0620ccae073400e44cb5136f145e60949ea1d5f3f048a0667f366ae7f2330fb5"
-    sha256 cellar: :any, sequoia:       "7f4186541ac17af9d5e831e1f1c2e4ca22b10fa958f6ac53a0afac0ae4d450ca"
+    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.10"
+    sha256 cellar: :any, arm64_tahoe:   "0d1c3955fecc17c3c5cf83c46c71c44b446ef2b9a7c03987bb12254f23a9a119"
+    sha256 cellar: :any, arm64_sequoia: "b5805e2d46c42e487a5696b7fa4dbc83b3cef08122f59eb899e3ed22bd83ef7f"
+    sha256 cellar: :any, tahoe:         "4d17c30c03c9c49ae21f72171d3e4c97e164d1f5505077aaaf412de4a71236dc"
+    sha256 cellar: :any, sequoia:       "e919dc66446072bcd818a198cf314b366adae6a8c31975d5ce971985779c1006"
   end
 
   depends_on "node@22"
@@ -42,7 +42,11 @@ class Relay < Formula
       address.ip_address if address.ipv4? && !address.ipv4_loopback?
     end.uniq
     lan_addresses.each { |address| puts "On this local network: http://#{address}:3000" }
-    puts "Access token (keep it private): #{token_path.read.strip}"
+    token = token_path.read.strip
+    puts
+    puts ">>> RELAY ACCESS TOKEN — KEEP PRIVATE <<<"
+    puts($stdout.tty? ? "\e[1;97;41m  #{token}  \e[0m" : "  #{token}  ")
+    puts
     puts "To retrieve it later: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
     opoo "Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router."
   end
