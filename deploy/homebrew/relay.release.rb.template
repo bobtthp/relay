@@ -34,7 +34,8 @@ class Relay < Formula
       address.ip_address if address.ipv4? && !address.ipv4_loopback?
     end.uniq
     lan_addresses.each { |address| puts "On this local network: http://#{address}:3000" }
-    puts "Access token: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
+    puts "Access token (keep it private): #{token_path.read.strip}"
+    puts "To retrieve it later: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
     opoo "Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router."
   end
 
