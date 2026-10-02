@@ -3,16 +3,16 @@
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/bobtthp/relay"
-  url "https://github.com/bobtthp/relay/releases/download/v0.1.8/relay-0.1.8.tar.gz"
-  sha256 "79cd0bb4866e24a60a5a7240400ee162feb70b4bbf729e3281b955d72d10d96a"
+  url "https://github.com/bobtthp/relay/releases/download/v0.1.9/relay-0.1.9.tar.gz"
+  sha256 "88f04d6d52da141fd8b421b285256b454f61e8a6d9690bc86f6b2488a4daf522"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.8"
-    sha256 cellar: :any, arm64_tahoe:   "5286709c4a56d577139aaf7d745cdd26a74a301d76aaf6024ca883fc4137c945"
-    sha256 cellar: :any, arm64_sequoia: "2222d2d067b43e6d01dbe45a06c2c25fe56793825ec2b44869f1addb1373112b"
-    sha256 cellar: :any, tahoe:         "b8c09cc7e864c1729a46e24b7e90dc0cd97475b95caa89167ac7b161376a7474"
-    sha256 cellar: :any, sequoia:       "7be37513122d349dc0ca938fd30f84fd55ce082abf230cdd13677c4f21dd3a93"
+    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.9"
+    sha256 cellar: :any, arm64_tahoe:   "a30660bef22edcb7903e5207c8acd194d12f99b41ba4c7ad36a22928be88aadf"
+    sha256 cellar: :any, arm64_sequoia: "1c820d3c657499bf666ea25f3146b9a4b97def0a9f4416ca547824582caf202e"
+    sha256 cellar: :any, tahoe:         "0620ccae073400e44cb5136f145e60949ea1d5f3f048a0667f366ae7f2330fb5"
+    sha256 cellar: :any, sequoia:       "7f4186541ac17af9d5e831e1f1c2e4ca22b10fa958f6ac53a0afac0ae4d450ca"
   end
 
   depends_on "node@22"
@@ -42,7 +42,8 @@ class Relay < Formula
       address.ip_address if address.ipv4? && !address.ipv4_loopback?
     end.uniq
     lan_addresses.each { |address| puts "On this local network: http://#{address}:3000" }
-    puts "Access token: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
+    puts "Access token (keep it private): #{token_path.read.strip}"
+    puts "To retrieve it later: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
     opoo "Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router."
   end
 
