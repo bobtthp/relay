@@ -40,6 +40,8 @@ if [ ! -d "$TAP_DIR" ]; then
   esac
 fi
 
+brew trust --formula "$FORMULA_NAME"
+
 if [ -f "$FORMULA_PATH" ] && ! grep -q '^# Generated locally by Relay' "$FORMULA_PATH"; then
   echo "A different relay formula already exists in $TAP_DIR; refusing to overwrite it." >&2
   exit 1

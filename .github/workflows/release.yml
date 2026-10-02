@@ -84,6 +84,7 @@ jobs:
           SOURCE_ARCHIVE="$RUNNER_TEMP/source/$ARCHIVE"
           SOURCE_URL="file://$SOURCE_ARCHIVE"
           brew tap-new --no-git relay/ci
+          brew trust --formula relay/ci/relay
           TAP_DIR="$(brew --repository)/Library/Taps/relay/homebrew-ci"
           FORMULA_PATH="$TAP_DIR/Formula/relay.rb"
           export SOURCE_URL FORMULA_PATH
@@ -137,6 +138,7 @@ jobs:
         run: |
           set -euo pipefail
           brew tap-new --no-git relay/ci
+          brew trust --formula relay/ci/relay
           TAP_DIR="$(brew --repository)/Library/Taps/relay/homebrew-ci"
           FORMULA_PATH="$TAP_DIR/Formula/relay.rb"
           export FORMULA_PATH
