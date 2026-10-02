@@ -166,7 +166,20 @@ jobs:
           brew bottle --merge --write --no-commit --no-all-checks "${JSON_FILES[@]}"
 
           cp "$FORMULA_PATH" "$RUNNER_TEMP/relay.rb"
-          gh release upload "$GITHUB_REF_NAME" "${BOTTLE_FILES[@]}"
+          UPLOAD_DIR="$RUNNER_TEMP/release-bottles"
+          mkdir -p "$UPLOAD_DIR"
+          for bottle in "${BOTTLE_FILES[@]}"; do
+            filename=${bottle##*/}
+            release_filename=${filename/--/-}
+            cp "$bottle" "$UPLOAD_DIR/$release_filename"
+          done
+          shopt -s nullglob
+          UPLOAD_FILES=("$UPLOAD_DIR"/*.bottle.tar.gz)
+          if (( ${#UPLOAD_FILES[@]} != 4 )); then
+            echo "Expected four Homebrew bottle upload files" >&2
+            exit 1
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${UPLOAD_FILES[@]}"
       - name: Publish release and update formula
         env:
           GH_TOKEN: ${{ github.token }}
