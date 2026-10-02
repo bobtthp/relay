@@ -29,8 +29,9 @@ docs/
 
 ## 安全模型
 
-Relay 可以启动会读取和修改本地代码仓库的编程 Agent。默认情况下，服务只监听
-`127.0.0.1`。如果要从本机以外访问，请使用 HTTPS，并配置 `RELAY_AUTH_TOKEN`。
+Relay 可以启动会读取和修改本地代码仓库的编程 Agent。默认情况下，同一局域网内的
+设备可以访问服务，并需要输入访问令牌；令牌保存在 `~/.relay-web/auth-token`。
+请只在可信局域网中使用，绝不要将 3000 端口暴露到公网或配置路由器端口转发。
 自动批准为可选功能，默认关闭；开启后请检查设置，并查看各会话中记录的活动。
 
 ## 本地运行
@@ -46,7 +47,8 @@ npm run dev:all
 ```
 
 这个命令会同时启动前后端；按 Ctrl+C 会一起停止。前端地址是
-`http://localhost:5173`。首次启动时，在 Relay 界面中选择一个本地 Git 仓库。
+`http://localhost:5173`。首次打开时，在 Relay 界面中选择一个本地 Git 仓库。
+浏览器要求访问令牌时，在终端运行 `cat ~/.relay-web/auth-token` 查看。
 
 ## 开发
 
@@ -72,7 +74,10 @@ brew install bobtthp/relay/relay
 brew services start bobtthp/relay/relay
 ```
 
-安装后打开 `http://127.0.0.1:3000`。使用以下命令管理后台服务：
+安装后，在 Mac 上打开 `http://127.0.0.1:3000`，或在同一可信局域网的设备上打开
+`http://<Mac局域网IP>:3000`。按安装提示输入访问令牌，也可以运行
+`cat ~/.relay-web/auth-token` 再次查看。不要将 3000 端口暴露到公网或配置路由器端口转发。
+使用以下命令管理后台服务：
 
 ```sh
 brew services stop bobtthp/relay/relay
@@ -87,8 +92,7 @@ brew services stop bobtthp/relay/relay
 brew uninstall bobtthp/relay/relay
 ```
 
-公开 tap 尚未发布，因此这些命令要等 tap 和首个版本发布后才能使用。
-维护者从本地源码安装可参考 [Homebrew 本地安装指南](deploy/homebrew/README.md)；
+源码仓库本身托管 tap 公式。维护者从本地源码安装可参考 [Homebrew 本地安装指南](deploy/homebrew/README.md)；
 另一种安装方式见 [LaunchAgent 指南](deploy/launchd/README.md)，它使用本机已有的
 Node.js，不需要 Homebrew 来安装或管理 Relay。
 
@@ -98,9 +102,8 @@ Relay 页面适配手机和 iPad 的 Safari。Relay 和 Codex CLI 仍在 Mac 上
 手机或 iPad 连接这台 Mac 后即可查看任务并发送指令。
 
 如需私密远程访问，请在 Mac 和移动设备上安装并登录 Tailscale，再使用
-Tailscale Serve 将 HTTPS 请求转发到 `http://127.0.0.1:3000`。在 Safari
-中打开 Mac 的 Tailscale HTTPS 地址，并通过 tailnet ACL 限制可访问成员。
-Relay 应继续监听本机回环地址；不要把 3000 端口暴露到公网。详见
+Tailscale Serve 通过 HTTPS 访问 Relay，并在 Relay 页面输入访问令牌。
+通过 tailnet ACL 限制可访问成员；不要将 3000 端口暴露到公网或配置路由器端口转发。详见
 [私密远程访问指南](deploy/launchd/README.md#private-remote-access)。
 
 ## 自定义 Relay
@@ -125,7 +128,7 @@ Relay 应继续监听本机回环地址；不要把 3000 端口暴露到公网�
   Relay 会自动批准命令请求、有可审阅差异的文件修改，以及仅对当前轮生效的权限。
   MCP URL、表单和 Codex 提问仍需手动处理。Relay 不会自动打开 MCP URL；不支持的
   表单结构只能拒绝。
-- 本地任务缓存，以及仅监听回环地址的 macOS 服务安装方式：`deploy/launchd/` 中的
+- 本地任务缓存，以及 macOS 服务安装方式：`deploy/launchd/` 中的
   LaunchAgent 和 `deploy/homebrew/` 中的 Homebrew Formula/服务。
 
 计划中：抽离独立的本地 Relay Agent、设备配对、托管控制平面、SSH 设备注册、

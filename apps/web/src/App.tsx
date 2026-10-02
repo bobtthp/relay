@@ -9,6 +9,7 @@ import {
 import { apiAgentService, getTaskTokenUsage, listCodexModels, listTaskEvents, listTaskHistory, type CodexModel } from './services/apiAgentService'
 import { isExecutionLog, isFinalAssistantMessage, isStreamingDelta, mergeEventSnapshots, mergeSessionTimeline, type TranscriptMessage } from './services/chatTranscript'
 import { type AgentName, type Task } from './services/agentService'
+import { authenticatedFetch, getRelayAccessToken } from './services/auth'
 import type { PendingApproval } from '../../../packages/protocol/src/types.js'
 
 const copy = {
@@ -417,7 +418,7 @@ function App() {
   }
 
   useEffect(() => {
-    void fetch('/api/machines').then(async response => {
+    void authenticatedFetch('/api/machines').then(async response => {
       if (!response.ok) return
       const body = await response.json() as { items?: Array<{ name?: string }> }
       const name = body.items?.[0]?.name?.trim()
@@ -426,7 +427,7 @@ function App() {
   }, [])
 
   useEffect(() => {
-    void fetch('/api/projects').then(async response => {
+    void authenticatedFetch('/api/projects').then(async response => {
       const body = await response.json() as { items?: Array<{ id: string; name: string; path: string; branch: string; clean: boolean }>; error?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to load local projects')
       const loadedProjects = body.items ?? []
@@ -456,7 +457,7 @@ function App() {
   useEffect(() => { localStorage.setItem('relay-completion-volume', String(completionSoundVolume)) }, [completionSoundVolume])
   useEffect(() => { localStorage.setItem('relay-completion-sound-style', completionSound) }, [completionSound])
   useEffect(() => {
-    void fetch('/api/settings/approvals').then(async response => {
+    void authenticatedFetch('/api/settings/approvals').then(async response => {
       if (!response.ok) return
       const settings = await response.json() as { autoApproveConfirmations?: boolean }
       setAutoApproveConfirmations(settings.autoApproveConfirmations === true)
@@ -536,7 +537,7 @@ function App() {
 
   useEffect(() => {
     const loadRateLimit = () => {
-      void fetch('/api/account/rate-limits').then(async response => {
+      void authenticatedFetch('/api/account/rate-limits').then(async response => {
         const body = await response.json() as { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
         if (!response.ok) return
         setRateLimit(body.rateLimitsByLimitId?.codex ?? body.rateLimits ?? null)
@@ -550,6 +551,8 @@ function App() {
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(`${protocol}://${window.location.host}/ws`)
+    const accessToken = getRelayAccessToken()
+    if (accessToken) socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'authenticate', token: accessToken })), { once: true })
     socket.onmessage = event => {
       try {
       const message = JSON.parse(event.data) as {
@@ -735,7 +738,7 @@ function App() {
   }
 
   const setAutoApproval = (enabled: boolean) => {
-    void fetch('/api/settings/approvals', {
+    void authenticatedFetch('/api/settings/approvals', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ autoApproveConfirmations: enabled }),
@@ -755,7 +758,7 @@ function App() {
     const installingTool = source === 'codex' || source === 'claude' ? source : undefined
     setEnvironmentLoading(true)
     setEnvironmentError('')
-    void fetch('/api/environment').then(async response => {
+    void authenticatedFetch('/api/environment').then(async response => {
       const body = await response.json() as { tools?: EnvironmentItem[]; requirements?: EnvironmentItem[]; error?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to inspect this Mac')
       setEnvironment({ tools: body.tools ?? [], requirements: body.requirements ?? [] })
@@ -767,7 +770,7 @@ function App() {
 
   const showOverview = () => { setActiveView('overview'); setSidebarOpen(false); loadEnvironment() }
   const installTool = (tool: 'codex' | 'claude') => {
-    void fetch(`/api/environment/${tool}/install`, { method: 'POST' }).then(async response => {
+    void authenticatedFetch(`/api/environment/${tool}/install`, { method: 'POST' }).then(async response => {
       const body = await response.json() as { error?: string; message?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to start installation')
       notify(body.message ?? 'Installation started')
@@ -778,7 +781,7 @@ function App() {
   const browseDirectory = (directoryPath?: string) => {
     setProjectPickerError('')
     const query = directoryPath ? `?path=${encodeURIComponent(directoryPath)}` : ''
-    void fetch(`/api/directories${query}`).then(async response => {
+    void authenticatedFetch(`/api/directories${query}`).then(async response => {
       const body = await response.json() as typeof directory & { error?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to browse directories')
       setDirectory(body)
@@ -801,10 +804,10 @@ function App() {
   }
 
   const selectProject = (projectPath: string) => {
-    void fetch('/api/projects/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: projectPath }) }).then(async response => {
+    void authenticatedFetch('/api/projects/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: projectPath }) }).then(async response => {
       const body = await response.json() as { id?: string; name?: string; path?: string; branch?: string; clean?: boolean; error?: string }
       if (!response.ok) throw new Error(body.error ?? 'Unable to select project')
-      const refreshed = await fetch('/api/projects').then(result => result.json()) as { items?: Array<{ id: string; name: string; path: string; branch: string; clean: boolean }> }
+      const refreshed = await authenticatedFetch('/api/projects').then(result => result.json()) as { items?: Array<{ id: string; name: string; path: string; branch: string; clean: boolean }> }
       const loadedProjects = refreshed.items ?? []
       setWorkspaceProjects(loadedProjects)
       const project = loadedProjects.find(item => item.id === body.id)
@@ -816,9 +819,9 @@ function App() {
 
   const removeProject = (project: { id: string; name: string }) => {
     if (!window.confirm(`Remove ${project.name} from Relay? Your repository and Codex history will not be deleted.`)) return
-    void fetch(`/api/projects/${project.id}`, { method: 'DELETE' }).then(async response => {
+    void authenticatedFetch(`/api/projects/${project.id}`, { method: 'DELETE' }).then(async response => {
       if (!response.ok) { const body = await response.json() as { error?: string }; throw new Error(body.error ?? 'Unable to remove workspace') }
-      const refreshed = await fetch('/api/projects').then(result => result.json()) as { items?: Array<{ id: string; name: string; path: string; branch: string; clean: boolean }> }
+      const refreshed = await authenticatedFetch('/api/projects').then(result => result.json()) as { items?: Array<{ id: string; name: string; path: string; branch: string; clean: boolean }> }
       const loadedProjects = refreshed.items ?? []
       setWorkspaceProjects(loadedProjects)
       if (localProject?.id === project.id) {

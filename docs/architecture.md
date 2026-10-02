@@ -109,16 +109,18 @@ package-by-package:
 
 ### Stage 0: local development — now
 
-The local backend binds to `127.0.0.1`; Vite proxies the browser to it. This is
-for development and must not be directly exposed to the public internet.
+The dev launcher binds the local backend to `127.0.0.1`; Vite proxies the
+browser to it. Installed services listen on local network interfaces and
+require an access token. Never expose port 3000 to the public internet.
 
 ### Stage 1: private remote access
 
-The repository includes a macOS `launchd` installer that serves the built UI
-and API from the loopback-only Agent. Use a private HTTPS reverse proxy such
-as Tailscale Serve, with tailnet ACLs, for remote iPad/phone access. Do not
-bind the Agent or development server to a public interface. This validates
-remote use without operating a public relay.
+The repository includes macOS `launchd` and Homebrew service installers that
+serve the built UI and API on the local network and require an access token.
+Use a private HTTPS reverse proxy such as Tailscale Serve, with tailnet ACLs,
+for remote iPad/phone access. Never expose port 3000 to the public internet or
+configure router port forwarding. This validates remote use without operating
+a public relay.
 
 ### Stage 2: hosted preview
 

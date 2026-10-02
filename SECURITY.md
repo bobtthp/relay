@@ -3,8 +3,10 @@
 Relay can start coding-agent turns that read and modify local repositories. Treat
 it as a privileged local application.
 
-- Keep the service bound to `127.0.0.1` unless you have configured HTTPS and
-  `RELAY_AUTH_TOKEN`.
+- The default listener is available to devices on the local network and uses a
+  generated access token stored in `~/.relay-web/auth-token`. Use Relay only on
+  a trusted local network. Never expose port 3000 to the public internet or
+  forward it on your router.
 - Never commit `.env`, `.relay/`, or session/cache files.
 - Automatic approval is disabled by default. If enabled, Relay accepts command
   requests, file changes with a reviewable diff, and permissions limited to the

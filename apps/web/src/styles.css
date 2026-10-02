@@ -496,6 +496,18 @@ fieldset.approval-field { padding:10px; border:1px solid #51452d; border-radius:
 .approval-url { display:block; padding:9px; border-radius:5px; background:#100f0c; color:#e5e0d5; overflow-wrap:anywhere; font-size:11px; }
 .send-btn:disabled, .composer textarea:disabled { opacity:.5; cursor:not-allowed; }
 
+.auth-gate { min-height:100vh; display:grid; place-items:center; padding:24px; background:#0d1118; color:#e9ebf0; }
+.auth-card { width:min(100%, 420px); padding:28px; border:1px solid #303849; border-radius:12px; background:#151a23; box-shadow:0 24px 70px rgba(0,0,0,.4); }
+.auth-card h1 { margin:10px 0; font-size:24px; letter-spacing:-.04em; }
+.auth-card p { color:#98a2b1; font-size:13px; line-height:1.6; }
+.auth-card label { display:block; margin:22px 0 7px; color:#b8c0cc; font-size:12px; }
+.auth-card input { width:100%; padding:11px 12px; border:1px solid #394354; border-radius:6px; outline:0; background:#0f141c; color:#f2f3f7; font-family:var(--font-code); font-size:12px; }
+.auth-card input:focus { border-color:#7967d4; box-shadow:0 0 0 2px rgba(121,103,212,.16); }
+.auth-card .primary-btn { width:100%; justify-content:center; margin-top:14px; padding:10px; }
+.auth-card .auth-hint { margin-top:14px; font-size:11px; }
+.auth-card .auth-warning { margin-top:22px; padding-top:14px; border-top:1px solid #303849; color:#d7ad75; font-size:11px; }
+.auth-card .auth-error { color:#f09a9a; font-size:12px; }
+
 /* Keep UI typography on one scale, with monospace reserved for technical data. */
 :root {
   --font-ui: 'DM Sans', ui-sans-serif, system-ui, sans-serif;

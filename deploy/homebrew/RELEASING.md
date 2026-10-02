@@ -41,7 +41,8 @@ brew services start bobtthp/relay/relay
 ```
 
 After the tap is installed once, future formula updates arrive through
-`brew update`; users can upgrade Relay with `brew upgrade relay`.
+`brew update`; users can upgrade Relay with
+`brew upgrade --formula bobtthp/relay/relay`.
 
 For each release, update `version` in `package.json` and `package-lock.json`,
 commit and push the change to the default branch, then push the matching
@@ -52,6 +53,9 @@ allow GitHub Actions to write contents.
 Keep the existing local installer for checkout-based development; the release
 Formula uses a versioned GitHub Release archive instead.
 
-The service listens on `127.0.0.1:3000`. Codex CLI and its login remain a
-separate prerequisite. Do not run the Homebrew service and the legacy
-LaunchAgent at the same time because they use the same port and launchd label.
+The service listens on port `3000` for local-network connections and requires
+the token stored at `~/.relay-web/auth-token`. Keep the port private to a
+trusted LAN; do not expose it publicly or forward it on a router. Codex CLI and
+its login remain a separate prerequisite. Do not run the Homebrew service and
+the legacy LaunchAgent at the same time because they use the same port and
+launchd label.

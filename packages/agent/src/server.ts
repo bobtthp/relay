@@ -1,10 +1,12 @@
 import express from 'express'
 import { createServer } from 'node:http'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
+import fs from 'node:fs'
 import { execFile, spawn } from 'node:child_process'
-import { resolve } from 'node:path'
+import os from 'node:os'
+import path, { resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { WebSocketServer } from 'ws'
+import { WebSocket, WebSocketServer } from 'ws'
 import { events, machines, projects, refreshProjects, tasks } from './local-state.js'
 import type { AgentName, PendingApproval, SessionEvent } from '../../protocol/src/types.js'
 import { CodexAppServer, type RpcId } from './codex-app-server.js'
@@ -16,9 +18,30 @@ import { readApprovalSettings, writeApprovalSettings } from './approval-settings
 const app = express()
 const server = createServer(app)
 const port = Number(process.env.PORT ?? 3000)
-const host = process.env.RELAY_HOST ?? '127.0.0.1'
-const authToken = process.env.RELAY_AUTH_TOKEN
-if (host !== '127.0.0.1' && host !== 'localhost' && !authToken) throw new Error('RELAY_AUTH_TOKEN is required when RELAY_HOST is not loopback')
+const host = process.env.RELAY_HOST ?? '0.0.0.0'
+const isLoopbackHost = host === '127.0.0.1' || host === 'localhost' || host === '::1'
+const authTokenPath = process.env.RELAY_AUTH_TOKEN_FILE ?? path.join(process.env.RELAY_DATA_DIR ?? path.join(os.homedir(), '.relay-web'), 'auth-token')
+const loadOrCreateAuthToken = () => {
+  if (process.env.RELAY_AUTH_TOKEN) return process.env.RELAY_AUTH_TOKEN
+  if (isLoopbackHost) return undefined
+  fs.mkdirSync(path.dirname(authTokenPath), { recursive: true, mode: 0o700 })
+  try {
+    const token = fs.readFileSync(authTokenPath, 'utf8').trim()
+    if (token) {
+      fs.chmodSync(authTokenPath, 0o600)
+      return token
+    }
+  } catch { /* Create a token on first start. */ }
+  const token = randomBytes(32).toString('hex')
+  try {
+    fs.writeFileSync(authTokenPath, token, { flag: 'wx', mode: 0o600 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  fs.chmodSync(authTokenPath, 0o600)
+  return fs.readFileSync(authTokenPath, 'utf8').trim()
+}
+const authToken = loadOrCreateAuthToken()
 const requestToken = (headers: { authorization?: string; 'x-relay-token'?: string }) => headers['x-relay-token'] ?? headers.authorization?.replace(/^Bearer\s+/i, '')
 const authorized = (headers: { authorization?: string; 'x-relay-token'?: string }) => !authToken || requestToken(headers) === authToken
 const activeCodexTasks = new Set<string>()
@@ -73,11 +96,12 @@ const hydrateProjectCache = (project: typeof projects[number]) => {
   saveProjectCache(project.path, { tasks: projectTasks, events: events.filter(event => projectTaskIds.has(event.taskId)), hiddenCodexSessionIds: [...hiddenCodexSessionIds] })
 }
 for (const project of projects) hydrateProjectCache(project)
-const websocket = new WebSocketServer({ server, path: '/ws', verifyClient: (info: { req: import('node:http').IncomingMessage }) => authorized(info.req.headers) })
+const websocket = new WebSocketServer({ server, path: '/ws' })
+const authenticatedSockets = new WeakSet<WebSocket>()
 
 const broadcast = (message: unknown) => {
   const encoded = JSON.stringify(message)
-  websocket.clients.forEach(client => { if (client.readyState === 1) client.send(encoded) })
+  websocket.clients.forEach(client => { if (client.readyState === WebSocket.OPEN && authenticatedSockets.has(client)) client.send(encoded) })
 }
 
 const broadcastTaskStatus = (task: typeof tasks[number]) => broadcast({
@@ -530,6 +554,14 @@ codex.onNotification(message => {
   if (delta) appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text: delta, method: message.method, itemId }, sequence: 0, createdAt: new Date().toISOString() })
 })
 
+app.use(express.static(resolve(process.cwd(), 'dist/web')))
+app.get('/api/auth/status', (_request, response) => response.json({ required: Boolean(authToken) }))
+app.post('/api/auth/verify', (request, response) => authorized(request.headers)
+  ? response.json({ ok: true })
+  : response.status(401).json({ error: 'Invalid access token' }))
+app.get('/api/health', (_request, response) => {
+  response.json({ ok: true, mode: 'local-codex', service: 'relay-backend', codex: process.env.CODEX_BIN ?? 'codex' })
+})
 app.use((request, response, next) => authorized(request.headers) ? next() : response.status(401).json({ error: 'Unauthorized' }))
 app.use(express.json({ limit: '64kb' }))
 
@@ -541,10 +573,6 @@ app.put('/api/settings/approvals', (request, response) => {
   approvalSettings = nextSettings
   broadcast({ type: 'approval_settings', settings: approvalSettings })
   return response.json(approvalSettings)
-})
-
-app.get('/api/health', (_request, response) => {
-  response.json({ ok: true, mode: 'local-codex', service: 'relay-backend', codex: process.env.CODEX_BIN ?? 'codex' })
 })
 
 app.get('/api/environment', async (_request, response) => {
@@ -829,15 +857,33 @@ app.post('/api/tasks/:taskId/interrupt', (request, response) => {
   broadcastTaskStatus(task)
   return response.status(202).json({ accepted: true })
 })
-app.use(express.static(resolve(process.cwd(), 'dist/web')))
-
 websocket.on('connection', socket => {
-  socket.send(JSON.stringify({ type: 'connection_ready', payload: { mode: 'local-codex' } }))
+  const sendReady = () => {
+    authenticatedSockets.add(socket)
+    socket.send(JSON.stringify({ type: 'connection_ready', payload: { mode: 'local-codex' } }))
+  }
+  if (!authToken) { sendReady(); return }
+  const authenticationTimeout = setTimeout(() => socket.close(1008, 'Authentication required'), 5_000)
+  authenticationTimeout.unref()
+  socket.once('close', () => clearTimeout(authenticationTimeout))
+  socket.once('message', data => {
+    let message: { type?: string; token?: string } = {}
+    try { message = JSON.parse(data.toString()) as typeof message } catch { /* Close malformed handshakes below. */ }
+    if (message.type !== 'authenticate' || message.token !== authToken) {
+      clearTimeout(authenticationTimeout)
+      socket.close(1008, 'Unauthorized')
+      return
+    }
+    clearTimeout(authenticationTimeout)
+    sendReady()
+  })
 })
 
 server.listen(port, host, () => {
   console.log(`Relay backend listening on http://${host}:${port}`)
   console.log(`WebSocket endpoint: ws://${host}:${port}/ws`)
+  if (authToken) console.log(`Relay access token file: ${authTokenPath}`)
+  if (!isLoopbackHost) console.warn('Relay is available to devices on your local network. Do not expose port 3000 to the public internet.')
 })
 
 const shutdown = () => { codex.stop(); server.close(() => process.exit(0)) }

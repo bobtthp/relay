@@ -1,6 +1,7 @@
 import type { AgentName, AgentService, Task } from './agentService'
 import type { PendingApproval } from '../../../../packages/protocol/src/types.js'
 import { isFinalAssistantMessage, isStreamingDelta } from './chatTranscript.js'
+import { authenticatedFetch } from './auth'
 
 type ApiTask = {
   id: string
@@ -35,13 +36,13 @@ const toTask = (task: ApiTask): Task => ({
 
 export const apiAgentService: AgentService = {
   async listTasks() {
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId())}/tasks`)
+    const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(projectId())}/tasks`)
     if (!response.ok) throw new Error('Unable to load tasks')
     const body = await response.json() as { items: ApiTask[] }
     return body.items.map(toTask)
   },
   async createTask(agent, title, model, reasoningEffort) {
-    const response = await fetch(`/api/projects/${encodeURIComponent(projectId())}/tasks`, {
+    const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(projectId())}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agent, title, model, reasoningEffort }),
@@ -51,7 +52,7 @@ export const apiAgentService: AgentService = {
   },
   async updateTaskModel(task, model, reasoningEffort) {
     if (!task.id) throw new Error('Task id is missing')
-    const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}/model`, {
+    const response = await authenticatedFetch(`/api/tasks/${encodeURIComponent(task.id)}/model`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, reasoningEffort }),
@@ -64,7 +65,7 @@ export const apiAgentService: AgentService = {
   },
   async sendMessage(task, message, model, reasoningEffort) {
     if (!task.id) throw new Error('Task id is missing')
-    const response = await fetch(`/api/tasks/${task.id}/messages`, {
+    const response = await authenticatedFetch(`/api/tasks/${task.id}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, model, reasoningEffort }),
@@ -74,7 +75,7 @@ export const apiAgentService: AgentService = {
   },
   async interruptTask(task) {
     if (!task.id) throw new Error('Task id is missing')
-    const response = await fetch(`/api/tasks/${task.id}/interrupt`, { method: 'POST' })
+    const response = await authenticatedFetch(`/api/tasks/${task.id}/interrupt`, { method: 'POST' })
     if (!response.ok) {
       const body = await response.json() as { error?: string }
       throw new Error(body.error ?? 'Unable to interrupt task')
@@ -82,7 +83,7 @@ export const apiAgentService: AgentService = {
   },
   async deleteTask(task) {
     if (!task.id) throw new Error('Task id is missing')
-    const response = await fetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' })
+    const response = await authenticatedFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' })
     if (!response.ok) {
       const bodyText = await response.text()
       let detail = ''
@@ -96,7 +97,7 @@ export const apiAgentService: AgentService = {
   },
   async respondToApproval(task, approvalId, approvalResponse) {
     if (!task.id) throw new Error('Task id is missing')
-    const response = await fetch(`/api/tasks/${task.id}/approvals/${encodeURIComponent(approvalId)}`, {
+    const response = await authenticatedFetch(`/api/tasks/${task.id}/approvals/${encodeURIComponent(approvalId)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(approvalResponse),
@@ -111,14 +112,14 @@ export const apiAgentService: AgentService = {
 export type CodexModel = { model: string; displayName: string; description?: string; isDefault?: boolean; hidden?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: Array<{ reasoningEffort: string; description: string }> }
 
 export async function listCodexModels(): Promise<CodexModel[]> {
-  const response = await fetch('/api/models')
+  const response = await authenticatedFetch('/api/models')
   if (!response.ok) throw new Error('Unable to load Codex models')
   const body = await response.json() as { items?: CodexModel[] }
   return body.items ?? []
 }
 
 export async function listTaskEvents(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/events`)
+  const response = await authenticatedFetch(`/api/tasks/${taskId}/events`)
   if (!response.ok) throw new Error('Unable to load task events')
   const body = await response.json() as { items: Array<{ id: string; taskId: string; type?: string; createdAt: string; payload?: { text?: string; raw?: unknown; method?: string; itemId?: string; logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'; progressState?: 'running' | 'completed'; error?: boolean; stderr?: boolean } }> }
   return body.items.reduce<Array<{ id: string; taskId: string; text: string; method?: string; itemId?: string; createdAt: string; role: 'user' | 'assistant' | 'progress'; eventType?: string; logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'; progressState?: 'running' | 'completed' }>>((result, event) => {
@@ -142,14 +143,14 @@ export async function listTaskEvents(taskId: string) {
 }
 
 export async function listTaskHistory(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/history`)
+  const response = await authenticatedFetch(`/api/tasks/${taskId}/history`)
   if (!response.ok) throw new Error('Unable to load Codex session history')
   const body = await response.json() as { items: Array<{ role: 'user' | 'assistant'; text: string }> }
   return Array.isArray(body.items) ? body.items : []
 }
 
 export async function getTaskTokenUsage(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/usage`)
+  const response = await authenticatedFetch(`/api/tasks/${taskId}/usage`)
   if (!response.ok) return undefined
   const body = await response.json() as { tokenUsage?: Task['tokenUsage'] | null }
   return body.tokenUsage ?? undefined

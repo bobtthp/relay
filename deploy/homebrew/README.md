@@ -13,8 +13,11 @@ From the repository root, install or update Relay with:
 sh deploy/homebrew/install.sh
 ```
 
-Open `http://127.0.0.1:3000` after installation. The Agent listens on loopback
-only. Codex CLI must be installed and logged in separately.
+Open `http://127.0.0.1:3000` on the Mac or `http://<Mac-LAN-IP>:3000` from a
+device on the same trusted network. The service requires the token stored at
+`~/.relay-web/auth-token`; retrieve it with `cat ~/.relay-web/auth-token`.
+Never expose port 3000 to the public internet or forward it on your router.
+Codex CLI must be installed and logged in separately.
 
 ## Troubleshooting
 

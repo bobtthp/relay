@@ -89,6 +89,8 @@ else
   brew services start "$FORMULA_NAME"
 fi
 
-printf 'Relay installed and managed by Homebrew. Open http://127.0.0.1:3000\n'
+printf 'Relay installed and managed by Homebrew. On this Mac: http://127.0.0.1:3000\n'
+printf 'On the local network, open http://<Mac-LAN-IP>:3000 and enter the token from: cat ~/.relay-web/auth-token\n'
+printf 'Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router.\n'
 printf 'Manage it with: brew services stop relay/local/relay | restart | list\n'
 printf 'Logs: %s/var/log/relay.log and relay-error.log\n' "$BREW_REPOSITORY"

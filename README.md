@@ -32,10 +32,12 @@ Agent trust boundary.
 
 ## Security model
 
-Relay starts privileged coding-agent work. By default it binds only to
-`127.0.0.1`. If you expose it beyond the local computer, put it behind HTTPS
-and configure `RELAY_AUTH_TOKEN`. Automatic approval is opt-in; check the
-approval setting and review the activity recorded in each session.
+Relay starts privileged coding-agent work. By default it is available to
+devices on the local network and requires a generated access token stored in
+`~/.relay-web/auth-token`. Use it only on a trusted network; never expose port
+3000 to the public internet or forward it on your router. Automatic approval is
+opt-in; check the approval setting and review the activity recorded in each
+session.
 
 ## Run locally
 
@@ -50,7 +52,8 @@ npm run dev:backend
 ```
 
 In a second terminal, run `npm run dev` and open `http://localhost:5173`.
-On first launch, choose a local Git repository in the Relay UI.
+On first launch, choose a local Git repository in the Relay UI. When the
+browser asks for the access token, read it with `cat ~/.relay-web/auth-token`.
 
 ## Development
 
@@ -79,7 +82,11 @@ brew install bobtthp/relay/relay
 brew services start bobtthp/relay/relay
 ```
 
-Open `http://127.0.0.1:3000`. Manage the background service with:
+Open `http://127.0.0.1:3000` on the Mac, or `http://<Mac-LAN-IP>:3000` from a
+device on the same trusted network. Enter the access token shown by the
+installer; retrieve it later with `cat ~/.relay-web/auth-token`. Do not expose
+port 3000 to the public internet or forward it on your router. Manage the
+background service with:
 
 ```sh
 brew services stop bobtthp/relay/relay
@@ -94,12 +101,11 @@ brew services stop bobtthp/relay/relay
 brew uninstall bobtthp/relay/relay
 ```
 
-The public tap is not published yet, so these commands will work after the
-tap and first release are available. Maintainers installing from a local
-checkout can use the [local Homebrew guide](deploy/homebrew/README.md). See
-the [LaunchAgent guide](deploy/launchd/README.md) for the alternative setup,
-which uses an existing local Node.js installation and does not use Homebrew to
-install or manage Relay.
+The source repository hosts the tap formula. Maintainers installing from a
+local checkout can use the [local Homebrew guide](deploy/homebrew/README.md).
+See the [LaunchAgent guide](deploy/launchd/README.md) for the alternative
+setup, which uses an existing local Node.js installation and does not use
+Homebrew to install or manage Relay.
 
 ## Use Relay from a phone or iPad
 
@@ -108,10 +114,10 @@ and the Codex CLI continue running on your Mac; the mobile device connects to
 that Mac to view tasks and send instructions.
 
 For private remote access, install and sign in to Tailscale on the Mac and
-mobile device, then use Tailscale Serve as an HTTPS proxy to
-`http://127.0.0.1:3000`. Open the Mac's Tailscale HTTPS address in Safari and
-limit access with your tailnet ACLs. Keep Relay bound to loopback; do not
-expose port 3000 to the public internet. See the
+mobile device, then use Tailscale Serve as an HTTPS proxy to Relay. Open the
+Mac's Tailscale HTTPS address in Safari, enter the access token, and limit
+access with your tailnet ACLs. Do not expose port 3000 to the public internet.
+See the
 [private remote access guide](deploy/launchd/README.md#private-remote-access).
 
 ## Customize Relay
@@ -143,7 +149,7 @@ Implemented:
   to the current turn. MCP URLs, forms, and Codex questions still need manual
   handling. Relay never opens MCP URLs automatically, and unsupported form
   schemas can only be declined.
-- Local task cache and loopback-only macOS service installers: LaunchAgent under
+- Local task cache and authenticated macOS service installers: LaunchAgent under
   `deploy/launchd/` and Homebrew formula/service under `deploy/homebrew/`.
 
 Planned: extraction of the local Relay Agent, machine pairing, a hosted relay
