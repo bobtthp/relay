@@ -7,6 +7,7 @@ type SessionIndexEntry = { id: string; thread_name?: string; updated_at?: string
 
 const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')
 const indexPath = path.join(codexHome, 'session_index.jsonl')
+const MAX_SESSION_METADATA_BYTES = 1024 * 1024
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024
 const MAX_HISTORY_MESSAGES = 100
 const MAX_HISTORY_MESSAGE_CHARS = 32_000
@@ -54,7 +55,7 @@ function readSessionData() {
     try {
       // Session metadata is the first JSONL row. Read only the prefix instead
       // of loading potentially very large transcripts just to find that row.
-      const firstLine = readFileSlice(file, false, 4 * 1024).split('\n', 1)[0]
+      const firstLine = readFileSlice(file, false, MAX_SESSION_METADATA_BYTES).split('\n', 1)[0]
       const record = JSON.parse(firstLine) as { type?: string; payload?: { id?: string; session_id?: string; cwd?: string } }
       const sessionId = record.payload?.id ?? record.payload?.session_id
       if (record.type !== 'session_meta' || !record.payload?.cwd || !sessionId) continue
@@ -64,19 +65,55 @@ function readSessionData() {
   return result
 }
 
+export function refreshCodexSessionCache() {
+  sessionCache = undefined
+}
+
+function readCodexSessionTitle(file: string) {
+  const lines = readFileSlice(file, false, 2 * 1024 * 1024).split('\n')
+  for (const line of lines.slice(1)) {
+    try {
+      const row = JSON.parse(line) as {
+        type?: string
+        payload?: { type?: string; role?: string; message?: string; content?: Array<{ text?: string }> }
+      }
+      const payload = row.payload
+      const text = row.type === 'event_msg' && payload?.type === 'user_message'
+        ? payload.message ?? ''
+        : row.type === 'response_item' && payload?.type === 'message' && payload.role === 'user'
+          ? payload.content?.map(part => part.text ?? '').filter(Boolean).join('\n') ?? ''
+          : ''
+      const title = stripInjectedPromptContext(text).replace(/\s+/g, ' ').trim()
+      if (title && !/^(?:the following is the codex agent history\b|<turn_aborted\b|the user interrupted the previous turn\b)/i.test(title)) return Array.from(title).slice(0, 100).join('')
+    } catch { /* Ignore malformed or partial rollout rows. */ }
+  }
+  return undefined
+}
+
 export function discoverCodexTasks(projectId: string, projectPath: string): Task[] {
-  if (!fs.existsSync(indexPath)) return []
   const now = Date.now()
   if (!sessionCache || now - sessionCache.loadedAt > 60_000) sessionCache = { loadedAt: now, data: readSessionData() }
   const sessionData = sessionCache.data
-  const matches: Task[] = []
-  for (const line of fs.readFileSync(indexPath, 'utf8').split('\n')) {
+  const indexed = new Map<string, SessionIndexEntry>()
+  const indexContents = fs.existsSync(indexPath) ? fs.readFileSync(indexPath, 'utf8') : ''
+  for (const line of indexContents.split('\n')) {
     try {
       const entry = JSON.parse(line) as SessionIndexEntry
-      if (!entry.id || sessionData.get(entry.id)?.cwd !== projectPath) continue
-      const updatedAt = entry.updated_at ?? new Date().toISOString()
-      matches.push({ id: `codex-${entry.id}`, remoteSessionId: entry.id, projectId, title: entry.thread_name || 'Codex session', agent: 'Codex', status: 'completed', createdAt: updatedAt, lastActivityAt: updatedAt })
+      if (entry.id) indexed.set(entry.id, entry)
     } catch { /* Ignore malformed index rows. */ }
+  }
+  const matches: Task[] = []
+  for (const [sessionId, session] of sessionData) {
+    if (session.cwd !== projectPath) continue
+    const entry = indexed.get(sessionId)
+    let fileUpdatedAt = now
+    try {
+      fileUpdatedAt = fs.statSync(session.file).mtimeMs
+    } catch { /* Fall back to the current time for an unreadable rollout file. */ }
+    const indexedTime = entry?.updated_at ? Date.parse(entry.updated_at) : 0
+    const updatedAt = new Date(Math.max(fileUpdatedAt, Number.isFinite(indexedTime) ? indexedTime : 0)).toISOString()
+    const title = entry?.thread_name?.trim() || readCodexSessionTitle(session.file) || 'Codex session'
+    matches.push({ id: `codex-${sessionId}`, remoteSessionId: sessionId, projectId, title, agent: 'Codex', status: 'completed', createdAt: updatedAt, lastActivityAt: updatedAt })
   }
   return matches.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
 }

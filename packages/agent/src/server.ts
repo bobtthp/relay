@@ -10,8 +10,8 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { events, machines, projects, refreshProjects, tasks } from './local-state.js'
 import type { AgentName, PendingApproval, SessionEvent } from '../../protocol/src/types.js'
 import { CodexAppServer, type RpcId } from './codex-app-server.js'
-import { loadProjectCache, saveProjectCache } from './project-cache.js'
-import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionTokenUsage, stripInjectedPromptContext } from './codex-history.js'
+import { loadProjectCache, saveProjectCache, type DeletedTask } from './project-cache.js'
+import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionTokenUsage, refreshCodexSessionCache, stripInjectedPromptContext } from './codex-history.js'
 import { listDirectories, removeSavedProject, saveSelectedProject, validateProjectPath } from './local-project.js'
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
 
@@ -45,10 +45,12 @@ const authToken = loadOrCreateAuthToken()
 const requestToken = (headers: { authorization?: string; 'x-relay-token'?: string }) => headers['x-relay-token'] ?? headers.authorization?.replace(/^Bearer\s+/i, '')
 const authorized = (headers: { authorization?: string; 'x-relay-token'?: string }) => !authToken || requestToken(headers) === authToken
 const activeCodexTasks = new Set<string>()
+let shuttingDown = false
 // Event deltas arrive frequently. Keep the per-task sequence in memory so
 // appending an event stays O(1) instead of rescanning the full event log.
 const eventSequences = new Map<string, number>()
 const hiddenCodexSessionIds = new Set<string>()
+const deletedTasks: DeletedTask[] = []
 const codex = new CodexAppServer()
 let approvalSettings = readApprovalSettings()
 const automaticApprovalKinds = new Set<PendingApproval['kind']>(['command', 'file_change', 'permissions'])
@@ -75,9 +77,22 @@ const hydrateProjectCache = (project: typeof projects[number]) => {
   loadedProjectIds.add(project.id)
   const cached = loadProjectCache(project.path)
   if (!cached) return
+  for (const deleted of cached.deletedTasks ?? []) {
+    deleted.task.projectId = project.id
+    if (!deletedTasks.some(item => item.task.id === deleted.task.id)) deletedTasks.push(deleted)
+  }
   for (const task of cached.tasks) {
     task.projectId = project.id
-    if (task.status === 'waiting_for_approval') { task.status = 'interrupted'; task.pendingApprovals = [] }
+    if (task.status === 'running' || task.status === 'waiting_for_approval') {
+      if (task.executionStartedAt) {
+        const startedAt = Date.parse(task.executionStartedAt)
+        if (Number.isFinite(startedAt)) task.executionDurationMs = (task.executionDurationMs ?? 0) + Math.max(0, Date.now() - startedAt)
+      }
+      task.status = 'interrupted'
+      task.executionStartedAt = undefined
+      task.activeTurnId = undefined
+      task.pendingApprovals = []
+    }
     if (!loadedTaskIds.has(task.id)) {
       tasks.push(task)
       loadedTaskIds.add(task.id)
@@ -93,7 +108,12 @@ const hydrateProjectCache = (project: typeof projects[number]) => {
   for (const sessionId of cached.hiddenCodexSessionIds ?? []) hiddenCodexSessionIds.add(sessionId)
   const projectTasks = tasks.filter(task => task.projectId === project.id)
   const projectTaskIds = new Set(projectTasks.map(task => task.id))
-  saveProjectCache(project.path, { tasks: projectTasks, events: events.filter(event => projectTaskIds.has(event.taskId)), hiddenCodexSessionIds: [...hiddenCodexSessionIds] })
+  saveProjectCache(project.path, {
+    tasks: projectTasks,
+    events: events.filter(event => projectTaskIds.has(event.taskId)),
+    hiddenCodexSessionIds: [...hiddenCodexSessionIds],
+    deletedTasks: deletedTasks.filter(deleted => deleted.task.projectId === project.id),
+  })
 }
 for (const project of projects) hydrateProjectCache(project)
 const websocket = new WebSocketServer({ server, path: '/ws' })
@@ -117,6 +137,7 @@ const persist = (projectId?: string) => {
     tasks: tasks.filter(task => task.projectId === project.id),
     events: events.filter(event => tasks.some(task => task.id === event.taskId && task.projectId === project.id)),
     hiddenCodexSessionIds: [...hiddenCodexSessionIds],
+    deletedTasks: deletedTasks.filter(deleted => deleted.task.projectId === project.id),
   })
 }
 
@@ -198,6 +219,16 @@ const upsertProgressEvent = (taskId: string, progressKey: string, text: string, 
 const failTask = (task: typeof tasks[number], error: unknown) => {
   const now = new Date()
   pauseTaskTimer(task, now)
+  if (shuttingDown) {
+    task.status = 'interrupted'
+    task.activeTurnId = undefined
+    task.pendingApprovals = []
+    task.lastActivityAt = now.toISOString()
+    activeCodexTasks.delete(task.id)
+    persist(task.projectId)
+    broadcastTaskStatus(task)
+    return
+  }
   task.status = 'failed'
   task.lastActivityAt = now.toISOString()
   activeCodexTasks.delete(task.id)
@@ -555,6 +586,13 @@ codex.onNotification(message => {
 })
 
 app.use(express.static(resolve(process.cwd(), 'dist/web')))
+app.get('/', (_request, response) => response.status(503).type('html').send(`<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Relay 页面暂不可用</title><body style="margin:0;background:#0d1118;color:#e9ebf0;font:16px system-ui,sans-serif;display:grid;min-height:100vh;place-items:center">
+<main style="max-width:34rem;padding:2rem;line-height:1.6"><h1>Relay 页面暂不可用</h1>
+<p>Relay 服务正在运行，但网页文件没有加载。更新后请在 Mac 上重启 Relay 服务，再重新加载此页。</p>
+<p>Homebrew：<code>brew services restart relay</code></p><p>LaunchAgent：重新运行 <code>sh deploy/launchd/install.sh</code></p>
+<button onclick="location.reload()" style="padding:.6rem 1rem">重新加载</button></main></body></html>`))
 app.get('/api/auth/status', (_request, response) => response.json({ required: Boolean(authToken) }))
 app.post('/api/auth/verify', (request, response) => authorized(request.headers)
   ? response.json({ ok: true })
@@ -645,6 +683,7 @@ app.post('/api/projects/select', (request, response) => {
     const localProject = projects.find(project => project.path === projectPath)
     if (!localProject) throw new Error('Selected project is unavailable')
     hydrateProjectCache(localProject)
+    refreshCodexSessionCache()
     const discovered = discoverCodexTasks(localProject.id, localProject.path)
     addDiscoveredTasks(discovered)
     persist(localProject.id)
@@ -673,6 +712,7 @@ app.get('/api/projects/:projectId/tasks', (request, response) => {
   const project = projects.find(item => item.id === request.params.projectId)
   if (project) {
     hydrateProjectCache(project)
+    refreshCodexSessionCache()
     const discovered = discoverCodexTasks(project.id, project.path)
     addDiscoveredTasks(discovered)
     persist(project.id)
@@ -681,6 +721,78 @@ app.get('/api/projects/:projectId/tasks', (request, response) => {
     ...task,
     title: stripInjectedPromptContext(task.title),
   })) })
+})
+
+app.get('/api/projects/:projectId/deleted-tasks', (request, response) => {
+  const project = projects.find(item => item.id === request.params.projectId)
+  if (!project) return response.status(404).json({ error: 'Project not found' })
+  hydrateProjectCache(project)
+  refreshCodexSessionCache()
+  const archived = deletedTasks.filter(item => item.task.projectId === project.id)
+  const discovered = discoverCodexTasks(project.id, project.path)
+  const archivedBySessionId = new Map(archived.flatMap(item => item.task.remoteSessionId ? [[item.task.remoteSessionId, item] as const] : []))
+  const items = discovered.flatMap(task => {
+    const sessionId = task.remoteSessionId
+    if (!sessionId) return []
+    const deleted = archivedBySessionId.get(sessionId)
+    return [{ id: sessionId, title: task.title, lastActivityAt: task.lastActivityAt, deletedAt: deleted?.deletedAt ?? task.lastActivityAt }]
+  })
+  return response.json({ items })
+})
+
+app.post('/api/projects/:projectId/deleted-tasks/:sessionId/restore', async (request, response) => {
+  const project = projects.find(item => item.id === request.params.projectId)
+  if (!project) return response.status(404).json({ error: 'Project not found' })
+  hydrateProjectCache(project)
+  refreshCodexSessionCache()
+  const sessionId = request.params.sessionId
+  const codexTask = discoverCodexTasks(project.id, project.path).find(task => task.remoteSessionId === sessionId)
+  if (!codexTask) return response.status(404).json({ error: 'Recoverable Codex session not found' })
+  const existing = tasks.find(task => task.projectId === project.id && (task.remoteSessionId === sessionId || (task.remoteSessionAliases ?? []).includes(sessionId)))
+  if (existing?.status === 'running' || existing?.status === 'waiting_for_approval') {
+    const { tokenUsage: _tokenUsage, ...publicTask } = existing
+    return response.json(publicTask)
+  }
+  try {
+    await codex.resumeThread(sessionId, project.path)
+  } catch (error) {
+    return response.status(503).json({ error: error instanceof Error ? `Codex 无法恢复此会话：${error.message}` : 'Codex 无法恢复此会话' })
+  }
+  const archivedIndex = deletedTasks.findIndex(item => item.task.projectId === project.id && (item.task.remoteSessionId === sessionId || item.task.id === sessionId))
+  let restored: typeof tasks[number] | undefined
+  if (existing) {
+    restored = existing
+    restored.title = codexTask.title
+    restored.lastActivityAt = codexTask.lastActivityAt
+    restored.status = 'interrupted'
+    restored.executionStartedAt = undefined
+    restored.activeTurnId = undefined
+    restored.pendingApprovals = []
+    if (archivedIndex >= 0) deletedTasks.splice(archivedIndex, 1)
+  } else if (archivedIndex >= 0) {
+    const archived = deletedTasks.splice(archivedIndex, 1)[0]
+    restored = {
+      ...archived.task,
+      title: codexTask.title,
+      lastActivityAt: codexTask.lastActivityAt,
+      status: 'interrupted',
+      executionStartedAt: undefined,
+      activeTurnId: undefined,
+      pendingApprovals: [],
+    }
+    tasks.push(restored)
+  } else {
+    restored = codexTask
+    restored.status = 'interrupted'
+    restored.activeTurnId = undefined
+    restored.pendingApprovals = []
+    tasks.push(restored)
+  }
+  for (const id of [restored.remoteSessionId, ...(restored.remoteSessionAliases ?? [])]) if (id) hiddenCodexSessionIds.delete(id)
+  persist(project.id)
+  broadcast({ type: 'task_restored', taskId: restored.id })
+  const { tokenUsage: _tokenUsage, ...publicTask } = restored
+  return response.json(publicTask)
 })
 
 app.get('/api/tasks/:taskId/events', (request, response) => {
@@ -706,8 +818,10 @@ app.delete('/api/tasks/:taskId', (request, response) => {
     if (!sessionId) continue
     for (const key of fileChangePreviews.keys()) if (key.startsWith(`${sessionId}:`)) fileChangePreviews.delete(key)
   }
-  tasks.splice(taskIndex, 1)
-  for (let index = events.length - 1; index >= 0; index--) if (events[index].taskId === task.id) events.splice(index, 1)
+  const [removedTask] = tasks.splice(taskIndex, 1)
+  const removedEvents: SessionEvent[] = []
+  for (let index = events.length - 1; index >= 0; index--) if (events[index].taskId === task.id) removedEvents.unshift(...events.splice(index, 1))
+  deletedTasks.push({ task: removedTask, events: removedEvents, deletedAt: new Date().toISOString() })
   eventSequences.delete(task.id)
   persist(task.projectId)
   broadcast({ type: 'task_deleted', taskId: task.id })
@@ -886,6 +1000,23 @@ server.listen(port, host, () => {
   if (!isLoopbackHost) console.warn('Relay is available to devices on your local network. Do not expose port 3000 to the public internet.')
 })
 
-const shutdown = () => { codex.stop(); server.close(() => process.exit(0)) }
+const shutdown = () => {
+  if (shuttingDown) return
+  shuttingDown = true
+  const now = new Date()
+  for (const task of tasks) {
+    if (task.status !== 'running' && task.status !== 'waiting_for_approval') continue
+    pauseTaskTimer(task, now)
+    task.status = 'interrupted'
+    task.activeTurnId = undefined
+    task.pendingApprovals = []
+    task.lastActivityAt = now.toISOString()
+    activeCodexTasks.delete(task.id)
+    persist(task.projectId)
+    broadcastTaskStatus(task)
+  }
+  codex.stop()
+  server.close(() => process.exit(0))
+}
 process.once('SIGINT', shutdown)
 process.once('SIGTERM', shutdown)

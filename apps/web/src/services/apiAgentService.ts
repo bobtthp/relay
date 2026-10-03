@@ -5,6 +5,7 @@ import { authenticatedFetch } from './auth'
 
 type ApiTask = {
   id: string
+  remoteSessionId?: string
   title: string
   agent: AgentName
   status: 'running' | 'completed' | 'failed' | 'interrupted' | 'waiting_for_approval'
@@ -21,6 +22,7 @@ const projectId = () => sessionStorage.getItem('relay-active-project-id') ?? ''
 
 const toTask = (task: ApiTask): Task => ({
   id: task.id,
+  remoteSessionId: task.remoteSessionId,
   title: task.title,
   agent: task.agent,
   time: task.status === 'running' ? 'Running now' : 'Recently',
@@ -40,6 +42,20 @@ export const apiAgentService: AgentService = {
     if (!response.ok) throw new Error('Unable to load tasks')
     const body = await response.json() as { items: ApiTask[] }
     return body.items.map(toTask)
+  },
+  async listDeletedTasks(projectId) {
+    const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/deleted-tasks`)
+    if (!response.ok) throw new Error('Unable to load Codex history')
+    const body = await response.json() as { items: Array<{ id: string; title: string; lastActivityAt: string; deletedAt: string }> }
+    return body.items
+  },
+  async restoreDeletedTask(projectId, sessionId) {
+    const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/deleted-tasks/${encodeURIComponent(sessionId)}/restore`, { method: 'POST' })
+    if (!response.ok) {
+      const body = await response.json() as { error?: string }
+      throw new Error(body.error ?? 'Unable to restore task')
+    }
+    return toTask(await response.json() as ApiTask)
   },
   async createTask(agent, title, model, reasoningEffort) {
     const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(projectId())}/tasks`, {

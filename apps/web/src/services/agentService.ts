@@ -2,6 +2,7 @@ export type AgentName = 'Codex' | 'Claude'
 
 export type Task = {
   id?: string
+  remoteSessionId?: string
   title: string
   agent: AgentName
   time: string
@@ -17,6 +18,8 @@ export type Task = {
 
 export type AgentService = {
   listTasks(): Promise<Task[]>
+  listDeletedTasks(projectId: string): Promise<Array<{ id: string; title: string; lastActivityAt: string; deletedAt: string }>>
+  restoreDeletedTask(projectId: string, sessionId: string): Promise<Task>
   createTask(agent: AgentName, title: string, model?: string, reasoningEffort?: string): Promise<Task>
   updateTaskModel(task: Task, model: string, reasoningEffort: string): Promise<Task>
   sendMessage(task: Task, message: string, model?: string, reasoningEffort?: string): Promise<{ ok: true; message: string }>

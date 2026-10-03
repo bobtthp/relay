@@ -1,11 +1,11 @@
 # Homebrew install and service management
 
-This local development installer creates a Homebrew formula from the current
-checkout and builds the UI and Agent on this Mac. It installs Node.js 22 and
-registers the service through `brew services`. This source build requires
-compatible Command Line Tools. End users should use the published release
-formula; the release workflow will provide precompiled bottles for supported
-Macs.
+This local development installer builds the UI and Agent from the current
+checkout with Node.js 22, then copies the built files into the installed
+Homebrew Relay keg. Homebrew manages the service and Node runtime; it does not
+compile Relay, so updating Relay does not depend on the local Command Line
+Tools version. If Relay is not installed yet, the script installs the
+published bottle first. End users should use the published release formula.
 
 From the repository root, install or update Relay with:
 
@@ -21,13 +21,10 @@ Codex CLI must be installed and logged in separately.
 
 ## Troubleshooting
 
-If this local source installer stops with “Your Command Line Tools are too
-outdated,” install the update offered in System Settings → General → Software
-Update, then rerun it. If Software Update has no matching update, download the
-Command Line Tools version named in the error from
-[Apple Developer Downloads](https://developer.apple.com/download/all/). The
-release formula will avoid this local build for supported Macs by installing a
-precompiled bottle once the updated release workflow is used.
+The installer builds Relay in the checkout before stopping the service. If the
+build fails, the installed service is left untouched. It also checks the Relay
+task cache and stops before updating if any task is running or awaiting
+approval; finish or interrupt those tasks, then rerun the installer.
 
 Manage the service with Homebrew:
 
