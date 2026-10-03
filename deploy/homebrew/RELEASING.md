@@ -21,9 +21,12 @@ the rendered `Formula/relay.rb`, commits that formula to the default branch,
 and publishes the release. The source archive excludes local files that are
 not tracked by Git, including `.env` and `node_modules`.
 
-The bottle includes Relay's built UI, server, and Node.js dependencies. Homebrew
-still installs the `node@22` runtime as a bottle dependency; supported Macs do
-not build Relay locally or need Command Line Tools for the Relay formula.
+Each bottle runner installs the formula and smoke-tests the Homebrew service,
+including its health endpoint, access-token setup, and web page, before the
+workflow can publish the release. The bottle includes Relay's built UI, server,
+and Node.js dependencies. Homebrew still installs the `node@22` runtime as a
+bottle dependency; supported Macs do not build Relay locally or need Command
+Line Tools for the Relay formula.
 Systems without a matching bottle may fall back to a source build and require
 Command Line Tools.
 

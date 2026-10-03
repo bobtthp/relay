@@ -107,6 +107,45 @@ jobs:
           brew install --build-bottle --formula "$FORMULA_PATH"
           ROOT_URL="https://github.com/$REPOSITORY/releases/download/$TAG"
           brew bottle --json --root-url="$ROOT_URL" --force-core-tap "$FORMULA_PATH"
+      - name: Smoke-test the installed Homebrew service
+        shell: bash
+        run: |
+          set -euo pipefail
+          FORMULA=relay/ci/relay
+          brew services start "$FORMULA"
+          cleanup() {
+            brew services stop "$FORMULA" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for attempt in {1..60}; do
+            if health="$(curl --silent --show-error --fail http://127.0.0.1:3000/api/health 2>/dev/null)"; then
+              printf '%s' "$health" | ruby -rjson -e '
+                data = JSON.parse(STDIN.read)
+                abort "Unexpected Relay health response: #{data}" unless data["ok"] == true && data["service"] == "relay-backend"
+              '
+
+              auth_status="$(curl --silent --show-error --fail http://127.0.0.1:3000/api/auth/status)"
+              printf '%s' "$auth_status" | ruby -rjson -e '
+                data = JSON.parse(STDIN.read)
+                abort "Relay did not initialize access-token authentication" unless data["required"] == true
+              '
+
+              page_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/)"
+              if [[ "$page_status" != "200" ]]; then
+                echo "Relay web page returned HTTP $page_status" >&2
+                exit 1
+              fi
+              echo "Homebrew-installed Relay service passed health, auth, and web checks."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Relay Homebrew service did not become healthy within 60 seconds." >&2
+          brew services list >&2 || true
+          brew services info "$FORMULA" >&2 || true
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: relay-bottle-${{ matrix.runner }}
