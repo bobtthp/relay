@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -13,15 +13,17 @@ import { authenticatedFetch, getRelayAccessToken } from './services/auth'
 import type { PendingApproval } from '../../../packages/protocol/src/types.js'
 
 const copy = {
-  en: { workspace: 'WORKSPACE', connected: 'Connected', overview: 'Overview', projects: 'Projects', activity: 'Activity', workspaces: 'WORKSPACES', recentTasks: 'Recent tasks', projectActivity: 'PROJECT ACTIVITY', newTask: 'New task', searchTasks: 'Search tasks', running: 'Running', completed: 'Completed', readingSize: 'READING SIZE', language: 'LANGUAGE', completionSound: 'COMPLETION SOUND', autoApproval: 'Auto-approve eligible requests', autoApprovalHelp: 'Allows commands, reviewed file changes, and current-turn permissions. Links, forms, and Codex questions still need you.', soundEnabled: 'Play when a task finishes', soundStyle: 'Sound', chimeSound: 'Chime', bellSound: 'Bell', digitalSound: 'Digital', volume: 'Volume', previewSound: 'Preview sound', task: 'Task', agent: 'Agent', startTask: 'Start task', cancel: 'Cancel', ask: 'Ask', sendHint: 'Enter for new line · Shift + Enter to send', liveOutput: 'LIVE OUTPUT', selectedTask: 'SELECTED TASK' },
-  zh: { workspace: '工作区', connected: '已连接', overview: '概览', projects: '项目', activity: '活动', workspaces: 'WORKSPACES', recentTasks: '最近任务', projectActivity: '项目动态', newTask: '新建任务', searchTasks: '搜索任务', running: '执行中', completed: '已完成', readingSize: '阅读字号', language: '语言', completionSound: '完成提示音', autoApproval: '自动批准可自动处理的请求', autoApprovalHelp: '自动允许命令、可审阅的文件修改和仅本轮权限。外部链接、表单和 Codex 提问仍需你处理。', soundEnabled: '任务完成时播放', soundStyle: '音效', chimeSound: '清脆', bellSound: '铃声', digitalSound: '电子音', volume: '音量', previewSound: '试听提示音', task: '任务', agent: 'Agent', startTask: '新建任务', cancel: '取消', ask: '向', sendHint: 'Enter 换行 · Shift + Enter 发送', liveOutput: '实时输出', selectedTask: '当前任务' },
+  en: { workspace: 'WORKSPACE', connected: 'Connected', overview: 'Overview', projects: 'Projects', activity: 'Activity', workspaces: 'WORKSPACES', recentTasks: 'Recent tasks', projectActivity: 'PROJECT ACTIVITY', newTask: 'New task', searchTasks: 'Search tasks', running: 'Running', completed: 'Completed', readingSize: 'READING SIZE', language: 'LANGUAGE', completionSound: 'COMPLETION SOUND', autoApproval: 'Auto-approve eligible requests', autoApprovalHelp: 'Allows commands, reviewed file changes, and current-turn permissions.', autoAcceptDefaultForms: 'Auto-accept forms with defaults', autoAcceptDefaultFormsHelp: 'Submits an MCP form only when every required field has a valid default. Links and Codex questions still need you.', soundEnabled: 'Play when a task finishes', soundStyle: 'Sound', chimeSound: 'Chime', bellSound: 'Bell', digitalSound: 'Digital', volume: 'Volume', previewSound: 'Preview sound', task: 'Task', agent: 'Agent', startTask: 'Start task', cancel: 'Cancel', ask: 'Ask', sendHint: 'Enter for new line · Shift + Enter to send', liveOutput: 'LIVE OUTPUT', selectedTask: 'SELECTED TASK' },
+  zh: { workspace: '工作区', connected: '已连接', overview: '概览', projects: '项目', activity: '活动', workspaces: 'WORKSPACES', recentTasks: '最近任务', projectActivity: '项目动态', newTask: '新建任务', searchTasks: '搜索任务', running: '执行中', completed: '已完成', readingSize: '阅读字号', language: '语言', completionSound: '完成提示音', autoApproval: '自动批准可自动处理的请求', autoApprovalHelp: '自动允许命令、可审阅的文件修改和仅本轮权限。', autoAcceptDefaultForms: '自动接受有默认值的表单', autoAcceptDefaultFormsHelp: '仅当所有必填项都有有效默认值时自动提交 MCP 表单；外链和 Codex 提问仍需你处理。', soundEnabled: '任务完成时播放', soundStyle: '音效', chimeSound: '清脆', bellSound: '铃声', digitalSound: '电子音', volume: '音量', previewSound: '试听提示音', task: '任务', agent: 'Agent', startTask: '新建任务', cancel: '取消', ask: '向', sendHint: 'Enter 换行 · Shift + Enter 发送', liveOutput: '实时输出', selectedTask: '当前任务' },
 } as const
 
 type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt: number }
 type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null }
+const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && limit.resetsAt * 1_000 > Date.now()))
 type EnvironmentItem = { id?: 'codex' | 'claude'; label: string; installed: boolean; version?: string; status?: 'installing' | 'failed'; detail?: string }
 type CompletionSound = 'chime' | 'bell' | 'digital'
 const CODEX_MODEL_REFRESH_MS = 24 * 60 * 60 * 1_000
+const CHAT_HISTORY_PAGE_SIZE = 10
 
 function formatTime(timestamp: string) {
   return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestamp))
@@ -81,13 +83,20 @@ const ChatMessage = memo(function ChatMessage({ message, agent, language }: { me
   return <div className={`preview-event session-message ${message.role}`}><div className="event-marker"><MessageSquare size={14} /></div><div><strong>{message.role === 'user' ? 'You' : agent}{message.createdAt && <span className="event-time">{formatTime(message.createdAt)}</span>}</strong><div className="markdown-output message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div></div></div>
 }, (previous, next) => previous.agent === next.agent && previous.language === next.language && previous.message.id === next.message.id && previous.message.role === next.message.role && previous.message.text === next.message.text && previous.message.createdAt === next.message.createdAt)
 
-const ChatTranscript = memo(function ChatTranscript({ messages, agent, language }: { messages: TranscriptMessage[]; agent: AgentName; language: 'en' | 'zh' }) {
+const ChatTranscript = memo(function ChatTranscript({ messages, agent, language, hasOlder, loadingOlder, onLoadOlder }: { messages: TranscriptMessage[]; agent: AgentName; language: 'en' | 'zh'; hasOlder: boolean; loadingOlder: boolean; onLoadOlder: () => void }) {
   const transcriptRef = useRef<HTMLDivElement>(null)
   const followLatest = useRef(true)
+  const preserveScroll = useRef<{ height: number; top: number } | null>(null)
+  const loadRequested = useRef(false)
   const latestMessage = messages.at(-1)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const transcript = transcriptRef.current
+    if (transcript && preserveScroll.current) {
+      transcript.scrollTop = preserveScroll.current.top + transcript.scrollHeight - preserveScroll.current.height
+      preserveScroll.current = null
+      return
+    }
     if (transcript && followLatest.current) transcript.scrollTop = transcript.scrollHeight
   }, [messages.length, latestMessage?.role, latestMessage?.text, latestMessage?.createdAt])
 
@@ -97,18 +106,39 @@ const ChatTranscript = memo(function ChatTranscript({ messages, agent, language 
   return <div className="chat-transcript" ref={transcriptRef} onScroll={event => {
     const element = event.currentTarget
     followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 28
-  }}>{chatMessages.map((message, index) => <ChatMessage key={message.id ?? `${message.role}-${index}`} message={message} agent={agent} language={language} />)}</div>
+    if (element.scrollTop < 42 && hasOlder && !loadingOlder && !loadRequested.current) {
+      loadRequested.current = true
+      preserveScroll.current = { height: element.scrollHeight, top: element.scrollTop }
+      onLoadOlder()
+    }
+    if (element.scrollTop > 80) loadRequested.current = false
+  }}>{loadingOlder && <div className="history-loading-indicator">{language === 'zh' ? '正在加载更早的消息…' : 'Loading earlier messages…'}</div>}{chatMessages.map((message, index) => <ChatMessage key={message.id ?? `${message.role}-${index}`} message={message} agent={agent} language={language} />)}</div>
 })
 
-const RateLimitStatus = memo(function RateLimitStatus({ rateLimit }: { rateLimit: RateLimits }) {
+const RateLimitStatus = memo(function RateLimitStatus({ rateLimit, language }: { rateLimit: RateLimits; language: 'en' | 'zh' }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     const ticker = window.setInterval(() => setNow(Date.now()), 1_000)
     return () => window.clearInterval(ticker)
   }, [])
-  const resetInSeconds = Math.max(0, rateLimit.primary.resetsAt * 1000 - now) / 1_000
-  const formatCountdown = (seconds: number) => `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds % 3600 / 60)).padStart(2, '0')}m`
-  return <div className="topbar-token" title={`Codex 5-hour quota resets in ${formatCountdown(resetInSeconds)}`}><span>5h</span><strong>{rateLimit.primary.usedPercent}%</strong><i><b style={{ width: `${rateLimit.primary.usedPercent}%` }} /></i><em>↻ {formatCountdown(resetInSeconds)}</em>{rateLimit.secondary && <><span className="quota-week">7d</span><strong>{rateLimit.secondary.usedPercent}%</strong></>}</div>
+  const formatCountdown = (resetsAt: number) => {
+    const seconds = Math.max(0, resetsAt * 1_000 - now) / 1_000
+    const days = Math.floor(seconds / 86_400)
+    const hours = Math.floor(seconds % 86_400 / 3_600)
+    const minutes = Math.floor(seconds % 3_600 / 60)
+    if (days) return `${days}d ${hours}h`
+    return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  }
+  const renderWindow = (label: string, window: RateLimitWindow) => {
+    const remaining = Math.round(Math.max(0, 100 - window.usedPercent))
+    const resetAt = new Date(window.resetsAt * 1_000).toLocaleString()
+    return <span className="quota-window" key={label} title={`${label} quota: ${window.usedPercent}% used, ${remaining}% remaining. Resets at ${resetAt}.`}>
+      <span className="quota-window-label">{label}</span><strong>{remaining}%</strong><span className="quota-window-remaining">{language === 'zh' ? '剩余' : 'left'}</span>
+      <i className="quota-bar"><b style={{ width: `${Math.min(100, Math.max(0, window.usedPercent))}%` }} /></i>
+      <small>↻ {formatCountdown(window.resetsAt)}</small>
+    </span>
+  }
+  return <div className="topbar-token">{renderWindow('5h', rateLimit.primary)}{rateLimit.secondary && renderWindow('7d', rateLimit.secondary)}</div>
 })
 
 const TaskDuration = memo(function TaskDuration({ task, language }: { task: Task; language: 'en' | 'zh' }) {
@@ -164,6 +194,7 @@ const TaskComposer = memo(function TaskComposer({
   actions,
   agent,
   disabled,
+  quotaBlocked,
   language,
   models,
   model,
@@ -173,6 +204,7 @@ const TaskComposer = memo(function TaskComposer({
   actions: { current: ComposerActions }
   agent: AgentName
   disabled: boolean
+  quotaBlocked: boolean
   language: 'en' | 'zh'
   models: CodexModel[]
   model: string
@@ -186,7 +218,7 @@ const TaskComposer = memo(function TaskComposer({
     setDraft('')
   }
 
-  return <div className="composer"><div className="composer-model-row"><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={disabled} placeholder={disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{sendHint}</span></div>
+  return <div className="composer"><div className="composer-model-row"><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={disabled} placeholder={quotaBlocked ? (language === 'zh' ? 'Codex 额度已用完，重置后可继续输入' : 'Codex quota exhausted. You can continue after it resets.') : disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{quotaBlocked ? (language === 'zh' ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
 })
 
 let completionAudioContext: AudioContext | undefined
@@ -225,6 +257,25 @@ function App() {
   const executionLogResizeFrame = useRef<number | null>(null)
   const pendingExecutionLogWidth = useRef(executionLogWidth)
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth > 650)
+  const maximizeLayoutBefore = useRef<{ sidebarOpen: boolean; executionLogsCollapsed: boolean } | null>(null)
+  const leaveTaskMaximized = useCallback(() => {
+    setTaskMaximized(false)
+    const previous = maximizeLayoutBefore.current
+    if (!previous) return
+    setSidebarOpen(previous.sidebarOpen)
+    setExecutionLogsCollapsed(previous.executionLogsCollapsed)
+    maximizeLayoutBefore.current = null
+  }, [])
+  const toggleTaskMaximized = useCallback(() => {
+    if (taskMaximized) {
+      leaveTaskMaximized()
+      return
+    }
+    maximizeLayoutBefore.current = { sidebarOpen, executionLogsCollapsed }
+    setSidebarOpen(false)
+    setExecutionLogsCollapsed(true)
+    setTaskMaximized(true)
+  }, [executionLogsCollapsed, leaveTaskMaximized, sidebarOpen, taskMaximized])
   const [projectsExpanded, setProjectsExpanded] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const settingsMenuRef = useRef<HTMLDivElement>(null)
@@ -237,6 +288,7 @@ function App() {
     return stored === 'bell' || stored === 'digital' ? stored : 'chime'
   })
   const [autoApproveConfirmations, setAutoApproveConfirmations] = useState(false)
+  const [autoAcceptDefaultMcpForms, setAutoAcceptDefaultMcpForms] = useState(false)
   const completionSoundSettings = useRef({ enabled: completionSoundEnabled, volume: completionSoundVolume, sound: completionSound })
   completionSoundSettings.current = { enabled: completionSoundEnabled, volume: completionSoundVolume, sound: completionSound }
   const [localProject, setLocalProject] = useState<{ id: string; name: string; path: string; branch: string; clean: boolean } | null>(null)
@@ -248,6 +300,7 @@ function App() {
   const [directory, setDirectory] = useState<{ path: string; parent: string | null; items: Array<{ name: string; path: string; isGit: boolean }> } | null>(null)
   const [projectPickerError, setProjectPickerError] = useState('')
   const [rateLimit, setRateLimit] = useState<RateLimits | null>(null)
+  const quotaExhausted = quotaIsExhausted(rateLimit)
   const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
@@ -279,6 +332,9 @@ function App() {
     })
   }
   const [sessionHistory, setSessionHistory] = useState<Array<{ role: 'user' | 'assistant'; text: string }>>([])
+  const [visibleChatCount, setVisibleChatCount] = useState(CHAT_HISTORY_PAGE_SIZE)
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [activeView, setActiveView] = useState<'projects' | 'overview' | 'activity'>('projects')
   const [activityEvents, setActivityEvents] = useState<Array<{ taskId: string; taskTitle: string; role: 'user' | 'assistant' | 'progress'; text: string; createdAt: string }>>([])
   const [activityLoading, setActivityLoading] = useState(false)
@@ -306,11 +362,11 @@ function App() {
   useEffect(() => {
     if (!taskMaximized) return
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setTaskMaximized(false)
+      if (event.key === 'Escape') leaveTaskMaximized()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [taskMaximized])
+  }, [leaveTaskMaximized, taskMaximized])
 
   const getExecutionLogWidthAt = (clientX: number) => {
     const workspace = executionWorkspaceRef.current
@@ -412,14 +468,33 @@ function App() {
   const loadTaskEvents = (taskId?: string) => {
     if (!taskId) return
     const requestId = ++transcriptLoadRequest.current
+    setSessionHistory([])
+    setHistoryCursor(null)
+    setVisibleChatCount(CHAT_HISTORY_PAGE_SIZE)
     void Promise.allSettled([listTaskEvents(taskId), listTaskHistory(taskId)]).then(([eventsResult, historyResult]) => {
       if (requestId !== transcriptLoadRequest.current || tasksRef.current[activeTaskRef.current]?.id !== taskId) return
       if (eventsResult.status === 'fulfilled') setLiveEvents(current => mergeEventSnapshots(eventsResult.value, current.filter(event => event.taskId === taskId)))
-      if (historyResult.status === 'fulfilled') setSessionHistory(Array.isArray(historyResult.value) ? historyResult.value : [])
+      if (historyResult.status === 'fulfilled') {
+        setSessionHistory(historyResult.value.items)
+        setHistoryCursor(historyResult.value.nextCursor)
+      }
     })
     void getTaskTokenUsage(taskId).then(tokenUsage => {
       if (tokenUsage) setTasks(current => current.map(task => task.id === taskId ? { ...task, tokenUsage } : task))
     }).catch(() => undefined)
+  }
+
+  const loadOlderTaskHistory = () => {
+    const taskId = tasks[activeTask]?.id
+    const cursor = historyCursor
+    if (!taskId || cursor == null || historyLoading) return
+    setHistoryLoading(true)
+    void listTaskHistory(taskId, cursor).then(page => {
+      if (tasksRef.current[activeTaskRef.current]?.id !== taskId) return
+      setSessionHistory(current => [...page.items, ...current])
+      setVisibleChatCount(current => current + page.items.length)
+      setHistoryCursor(page.nextCursor)
+    }).catch(error => notify(error instanceof Error ? error.message : 'Unable to load earlier messages')).finally(() => setHistoryLoading(false))
   }
 
   useEffect(() => {
@@ -464,8 +539,9 @@ function App() {
   useEffect(() => {
     void authenticatedFetch('/api/settings/approvals').then(async response => {
       if (!response.ok) return
-      const settings = await response.json() as { autoApproveConfirmations?: boolean }
+      const settings = await response.json() as { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean }
       setAutoApproveConfirmations(settings.autoApproveConfirmations === true)
+      setAutoAcceptDefaultMcpForms(settings.autoAcceptDefaultMcpForms === true)
     }).catch(() => undefined)
   }, [])
   useEffect(() => { if (selectedModel) localStorage.setItem('relay-codex-model', selectedModel) }, [selectedModel])
@@ -554,11 +630,66 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!rateLimit) return
+    const resetAt = [rateLimit.primary, rateLimit.secondary]
+      .filter((window): window is RateLimitWindow => Boolean(window && window.usedPercent >= 100 && window.resetsAt * 1_000 > Date.now()))
+      .reduce((earliest, window) => Math.min(earliest, window.resetsAt * 1_000), Number.POSITIVE_INFINITY)
+    if (!Number.isFinite(resetAt)) return
+    const timer = window.setTimeout(() => {
+      void authenticatedFetch('/api/account/rate-limits').then(async response => {
+        if (!response.ok) return
+        const body = await response.json() as { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
+        setRateLimit(body.rateLimitsByLimitId?.codex ?? body.rateLimits ?? null)
+      }).catch(() => undefined)
+    }, Math.max(0, resetAt - Date.now() + 500))
+    return () => window.clearTimeout(timer)
+  }, [rateLimit])
+
+  useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const socket = new WebSocket(`${protocol}://${window.location.host}/ws`)
     const accessToken = getRelayAccessToken()
-    if (accessToken) socket.addEventListener('open', () => socket.send(JSON.stringify({ type: 'authenticate', token: accessToken })), { once: true })
-    socket.onmessage = event => {
+    const projectId = localProject?.id
+    let socket: WebSocket | null = null
+    let reconnectTimer = 0
+    let reconnectDelay = 1_000
+    let disposed = false
+    const syncTaskStatuses = () => {
+      if (!projectId) return
+      void authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/task-status`).then(async response => {
+        if (!response.ok) return
+        const body = await response.json() as { items?: Array<{ id: string; status: Task['state']; executionStartedAt: string | null; executionDurationMs?: number; pendingApprovals?: Task['pendingApprovals'] }> }
+        const statuses = new Map((body.items ?? []).map(item => [item.id, item]))
+        setTasks(current => {
+          let changed = false
+          const next = current.map(task => {
+            if (!task.id) return task
+            const status = statuses.get(task.id)
+            if (!status) return task
+            const executionStartedAt = status.executionStartedAt ?? undefined
+            const executionDurationMs = status.executionDurationMs ?? task.executionDurationMs
+            const pendingApprovals = status.pendingApprovals ?? []
+            const approvalsChanged = JSON.stringify(task.pendingApprovals ?? []) !== JSON.stringify(pendingApprovals)
+            if (task.state === status.status && task.executionStartedAt === executionStartedAt && task.executionDurationMs === executionDurationMs && !approvalsChanged) return task
+            changed = true
+            return { ...task, state: status.status, executionStartedAt, executionDurationMs, pendingApprovals }
+          })
+          return changed ? next : current
+        })
+      }).catch(() => undefined)
+    }
+    const connect = () => {
+      if (disposed) return
+      const nextSocket = new WebSocket(`${protocol}://${window.location.host}/ws`)
+      socket = nextSocket
+      if (accessToken) nextSocket.addEventListener('open', () => nextSocket.send(JSON.stringify({ type: 'authenticate', token: accessToken })), { once: true })
+      nextSocket.onopen = () => { reconnectDelay = 1_000; syncTaskStatuses() }
+      nextSocket.onclose = () => {
+        if (disposed) return
+        reconnectTimer = window.setTimeout(connect, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, 30_000)
+      }
+      nextSocket.onerror = () => nextSocket.close()
+      nextSocket.onmessage = event => {
       try {
       const message = JSON.parse(event.data) as {
         type?: string
@@ -569,7 +700,7 @@ function App() {
         tokenUsage?: Task['tokenUsage']
         approval?: NonNullable<Task['pendingApprovals']>[number]
         approvalId?: string
-        settings?: { autoApproveConfirmations?: boolean }
+        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean }
         event?: {
           id: string
           taskId: string
@@ -586,7 +717,10 @@ function App() {
           }
         }
       }
-        if (message.type === 'approval_settings' && message.settings) setAutoApproveConfirmations(message.settings.autoApproveConfirmations === true)
+        if (message.type === 'approval_settings' && message.settings) {
+          setAutoApproveConfirmations(message.settings.autoApproveConfirmations === true)
+          setAutoAcceptDefaultMcpForms(message.settings.autoAcceptDefaultMcpForms === true)
+        }
         if (message.type === 'task_deleted' && message.taskId) {
           setActiveTask(0)
           setTasks(current => current.filter(task => task.id !== message.taskId))
@@ -611,19 +745,29 @@ function App() {
           const logType = message.event.payload?.error || message.event.type === 'error' ? 'error' : message.event.type === 'test_result' ? 'test' : message.event.payload?.logType ?? (message.event.payload?.stderr ? 'warning' : undefined)
           if (text) queueLiveEvent({ id: message.event.id, taskId: message.event.taskId, text, method, itemId, createdAt: message.event.createdAt, role, eventType: message.event.type, logType, progressState: message.event.payload?.progressState })
       } catch { /* Ignore non-JSON socket messages. */ }
+      }
     }
+    connect()
+    const statusRefresh = window.setInterval(syncTaskStatuses, 5_000)
+    const onVisibilityChange = () => { if (document.visibilityState === 'visible') syncTaskStatuses() }
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
-      socket.close()
+      disposed = true
+      window.clearInterval(statusRefresh)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.clearTimeout(reconnectTimer)
+      socket?.close()
       if (liveEventFrame.current !== null) window.cancelAnimationFrame(liveEventFrame.current)
       liveEventFrame.current = null
       pendingLiveEvents.current = []
     }
-  }, [])
+  }, [localProject?.id])
 
   useEffect(() => {
     loadTaskEvents(tasks[activeTask]?.id)
   }, [activeTask, tasks.length])
 
+  const activityTaskKey = tasks.map(task => `${task.id ?? ''}:${task.title}`).join('|')
   useEffect(() => {
     if (activeView !== 'activity') return
     let cancelled = false
@@ -638,9 +782,10 @@ function App() {
       .catch(error => { if (!cancelled) notify(error instanceof Error ? error.message : 'Unable to load activity') })
       .finally(() => { if (!cancelled) setActivityLoading(false) })
     return () => { cancelled = true }
-  }, [activeView, activityRefresh, tasks])
+  }, [activeView, activityRefresh, activityTaskKey])
 
   const sendMessage = (draft: string) => {
+    if (quotaIsExhausted(rateLimit)) return
     if (!draft.trim() || tasks[activeTask].state === 'waiting_for_approval') return
     const message = draft.trim()
     const task = tasks[activeTask]
@@ -687,6 +832,7 @@ function App() {
   }
 
   const createTask = () => {
+    if (quotaIsExhausted(rateLimit)) return
     if (!newTaskTitle.trim()) return
     void apiAgentService.createTask(newTaskAgent, newTaskTitle.trim(), selectedModel || undefined, selectedEffort || undefined).then(task => {
       setTasks(current => [task, ...current])
@@ -784,6 +930,18 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
   }
 
+  const setAutoAcceptDefaultForms = (enabled: boolean) => {
+    void authenticatedFetch('/api/settings/approvals', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoAcceptDefaultMcpForms: enabled }),
+    }).then(async response => {
+      const result = await response.json() as { autoAcceptDefaultMcpForms?: boolean; error?: string }
+      if (!response.ok) throw new Error(result.error ?? 'Unable to save approval settings')
+      setAutoAcceptDefaultMcpForms(result.autoAcceptDefaultMcpForms === true)
+    }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
+  }
+
   const openProjectPicker = () => {
     setProjectPickerOpen(true)
     browseDirectory()
@@ -874,18 +1032,18 @@ function App() {
   // Keep older Codex-only turns, then use timestamped Relay events from the
   // first shared user message onward. This avoids both losing history and
   // appending duplicated older assistant replies at the end.
-  const chatMessages = useMemo(() => mergeSessionTimeline(sessionHistory, activeLiveEvents).slice(-120), [sessionHistory, activeLiveEvents])
+  const chatMessages = useMemo(() => mergeSessionTimeline(sessionHistory, activeLiveEvents).filter(message => !isExecutionLog(message)).slice(-visibleChatCount), [sessionHistory, activeLiveEvents, visibleChatCount])
 
   if (loading) return <div className="loading-screen">Loading local tasks…</div>
   if (!localProject) return <div className="loading-screen"><div className="empty-home"><FolderGit2 size={24} /><h1>Choose a local project</h1><p>Select a Git repository to load its local Codex session history.</p><button className="primary-btn" onClick={openProjectPicker}><Plus size={16} /> Choose project</button></div>{projectPickerOpen && <div className="modal-backdrop" onClick={() => setProjectPickerOpen(false)}><div className="modal project-picker" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">LOCAL PROJECT</span><h2>Choose a Git repository</h2></div><button className="icon-btn" onClick={() => setProjectPickerOpen(false)}><X size={18} /></button></div><p className="picker-path">{directory?.path ?? 'Loading…'}</p>{directory?.parent && <button className="parent-directory" onClick={() => browseDirectory(directory.parent ?? undefined)}>← Parent folder</button>}{projectPickerError && <p className="picker-error">{projectPickerError}</p>}<div className="directory-list">{directory?.items.map(item => <div className="directory-row" key={item.path}><button className="directory-open" onClick={() => browseDirectory(item.path)}><FolderGit2 size={16} /><span>{item.name}</span>{item.isGit && <small>Git repository</small>}</button>{item.isGit && <button className="secondary-btn" onClick={() => selectProject(item.path)}>Select</button>}</div>)}</div><p className="picker-hint">Choose a Git repository to load its local Codex session history.</p></div></div>}</div>
-  if (tasks.length === 0) return <div className="loading-screen"><div className="empty-home"><Sparkles size={24} /><h1>No local Codex sessions yet</h1><p>Create a task to start a session in {localProject.name}.</p><button className="primary-btn" onClick={() => setNewTaskOpen(true)}><Plus size={16} /> Start a task</button><button className="secondary-btn" onClick={() => void openDeletedTasks()}><Archive size={15} /> {language === 'zh' ? '浏览历史记录' : 'Browse history'}</button>{recoverTasksModal}{newTaskOpen && <div className="modal-backdrop" onClick={() => setNewTaskOpen(false)}><div className="modal" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">NEW SESSION</span><h2>Start a task</h2></div><button className="icon-btn" onClick={() => setNewTaskOpen(false)}><X size={18} /></button></div><label>Agent<select value={newTaskAgent} onChange={event => setNewTaskAgent(event.target.value as AgentName)}><option>Codex</option><option disabled>Claude (coming soon)</option></select></label>{newTaskAgent === 'Codex' && <><label>Model<select value={selectedModel} disabled={!models.length} onChange={event => setSelectedModel(event.target.value)}>{models.map(model => <option key={model.model} value={model.model}>{model.displayName || model.model}</option>)}</select></label><label>Reasoning level<select value={selectedEffort} disabled={!reasoningOptions.length} onChange={event => setSelectedEffort(event.target.value)}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select></label></>}<button className="secondary-btn" onClick={() => { setNewTaskOpen(false); void openDeletedTasks() }}><Archive size={15} /> {language === 'zh' ? '从历史会话继续' : 'Continue from history'}</button><label>Task<textarea autoFocus value={newTaskTitle} onChange={event => setNewTaskTitle(event.target.value)} placeholder="Describe what you want Codex to do…" /></label><div className="modal-actions"><button className="secondary-btn" onClick={() => setNewTaskOpen(false)}>Cancel</button><button className="primary-btn" onClick={createTask}><Zap size={15} /> Start task</button></div></div></div>}</div></div>
+  if (tasks.length === 0) return <div className="loading-screen"><div className="empty-home"><Sparkles size={24} /><h1>No local Codex sessions yet</h1><p>Create a task to start a session in {localProject.name}.</p><button className="primary-btn" disabled={quotaExhausted} onClick={() => setNewTaskOpen(true)}><Plus size={16} /> Start a task</button><button className="secondary-btn" onClick={() => void openDeletedTasks()}><Archive size={15} /> {language === 'zh' ? '浏览历史记录' : 'Browse history'}</button>{recoverTasksModal}{newTaskOpen && <div className="modal-backdrop" onClick={() => setNewTaskOpen(false)}><div className="modal" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">NEW SESSION</span><h2>Start a task</h2></div><button className="icon-btn" onClick={() => setNewTaskOpen(false)}><X size={18} /></button></div><label>Agent<select value={newTaskAgent} onChange={event => setNewTaskAgent(event.target.value as AgentName)}><option>Codex</option><option disabled>Claude (coming soon)</option></select></label>{newTaskAgent === 'Codex' && <><label>Model<select value={selectedModel} disabled={!models.length} onChange={event => setSelectedModel(event.target.value)}>{models.map(model => <option key={model.model} value={model.model}>{model.displayName || model.model}</option>)}</select></label><label>Reasoning level<select value={selectedEffort} disabled={!reasoningOptions.length} onChange={event => setSelectedEffort(event.target.value)}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select></label></>}<button className="secondary-btn" onClick={() => { setNewTaskOpen(false); void openDeletedTasks() }}><Archive size={15} /> {language === 'zh' ? '从历史会话继续' : 'Continue from history'}</button><label>Task<textarea autoFocus disabled={quotaExhausted} value={newTaskTitle} onChange={event => setNewTaskTitle(event.target.value)} placeholder="Describe what you want Codex to do…" /></label><div className="modal-actions"><button className="secondary-btn" onClick={() => setNewTaskOpen(false)}>Cancel</button><button className="primary-btn" disabled={quotaExhausted} onClick={createTask}><Zap size={15} /> Start task</button></div></div></div>}</div></div>
 
   return <div className={`app-shell reading-${readingSize}${taskMaximized ? ' task-maximized' : ''}${sidebarOpen ? '' : ' sidebar-collapsed'}`}>
     <header className="topbar">
       <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span></div>
       <div className="topbar-center"><span className="connection-dot" /> {machineName} <ChevronDown size={14} /></div>
-      {rateLimit && <RateLimitStatus rateLimit={rateLimit} />}
-      <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu" ref={settingsMenuRef}><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={playCompletionTone} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
+      {rateLimit && <RateLimitStatus rateLimit={rateLimit} language={language} />}
+      <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu" ref={settingsMenuRef}><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoAcceptDefaultMcpForms} onChange={event => setAutoAcceptDefaultForms(event.target.checked)} /><span>{text.autoAcceptDefaultForms}</span></label><p className="auto-approval-help">{text.autoAcceptDefaultFormsHelp}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={playCompletionTone} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
     </header>
 
     <div className="workspace">
@@ -901,27 +1059,27 @@ function App() {
 
       <main className={`main-content ${activeView === 'projects' ? `project-main-content${taskMaximized ? ' task-maximized' : ''}` : ''}`}>
         {activeView === 'overview' ? <section className="environment-page"><div className="content-header"><div className="breadcrumbs"><span className="muted">{text.overview}</span><ChevronRight size={14} /><strong>Local environment</strong></div><button className="secondary-btn" onClick={loadEnvironment}>Refresh</button></div><section className="project-hero"><div><span className="eyebrow">LOCAL AGENT SETUP</span><h1>Codex & Claude environment</h1><p className="path">Inspect the tools Relay uses on this Mac. Installation runs only when you choose it.</p></div></section>{environmentLoading && !environment ? <p className="environment-loading">Checking local tools…</p> : <><div className="environment-grid">{environment?.tools.map(tool => <article className="environment-card" key={tool.id}><div><span className="eyebrow">AI CODING AGENT</span><h2>{tool.label}</h2><p>{tool.installed ? tool.version ?? 'Installed' : 'Not installed'}</p></div><span className={`environment-status ${tool.status ?? (tool.installed ? 'installed' : 'missing')}`}>{tool.status === 'installing' ? 'Installing' : tool.status === 'failed' ? 'Failed' : tool.installed ? 'Ready' : 'Missing'}</span>{tool.status === 'failed' && <small className="environment-error">{tool.detail}</small>}<button className={tool.installed ? 'secondary-btn' : 'primary-btn'} disabled={tool.status === 'installing'} onClick={() => !tool.installed && tool.id && installTool(tool.id)}>{tool.status === 'installing' ? 'Installing…' : tool.installed ? 'Installed' : `Install ${tool.label}`}</button></article>)}</div><section className="environment-requirements"><span className="eyebrow">REQUIREMENTS</span>{environment?.requirements.map(item => <div key={item.label}><span>{item.label}</span><strong className={item.installed ? 'ok' : 'missing'}>{item.installed ? item.version ?? 'Ready' : 'Missing'}</strong></div>)}</section><p className="environment-note">After installation, sign in in a local terminal with <code>codex login</code> or <code>claude login</code>. Relay does not store your credentials.</p>{environmentError && <p className="environment-error">{environmentError}</p>}</>}</section> : activeView === 'activity' ? <section className="activity-page"><div className="content-header"><div className="breadcrumbs"><span className="muted">{text.workspace}</span><ChevronRight size={14} /><strong>{text.activity}</strong></div><button className="secondary-btn" onClick={() => setActivityRefresh(value => value + 1)}>Refresh</button></div><section className="project-hero"><div><span className="eyebrow">LOCAL SESSION FEED</span><h1>{text.activity}</h1><p className="path">Recent messages across tasks in {localProject?.name ?? 'this project'}.</p></div></section>{activityLoading ? <p className="environment-loading">Loading activity…</p> : activityEvents.length ? <div className="activity-feed">{activityEvents.map((event, index) => <article className={`activity-item ${event.role}`} key={`${event.taskId}-${event.createdAt}-${index}`}><div className="activity-marker"><MessageSquare size={15} /></div><div className="activity-body"><div className="activity-meta"><strong>{event.role === 'user' ? 'You' : event.role === 'progress' ? 'Codex activity' : 'Codex'}</strong><time>{formatTime(event.createdAt)}</time></div><button className="activity-task-link" onClick={() => { const index = tasks.findIndex(task => task.id === event.taskId); if (index >= 0) { setActiveTask(index); setActiveView('projects') } }}>{event.taskTitle}</button><div className="markdown-output"><ReactMarkdown remarkPlugins={[remarkGfm]}>{event.text}</ReactMarkdown></div></div></article>)}</div> : <div className="empty-tasks">No task messages yet.</div>}</section> : <>
-        <div className="content-header project-content-header"><div className="breadcrumbs"><span className="muted">{text.projects}</span><ChevronRight size={14} /><strong>{localProject?.name ?? 'Local project'}</strong></div><div className="header-actions"><button className="secondary-btn" onClick={() => notify('Raw terminal needs the SSH terminal endpoint, which is not enabled yet')}><TerminalSquare size={15} /> Open terminal</button><button className="secondary-btn" onClick={() => void openDeletedTasks()}><Archive size={15} /> {language === 'zh' ? '历史记录' : 'History'}</button><button className="primary-btn" onClick={() => setNewTaskOpen(true)}><Plus size={16} /> {text.newTask}</button></div></div>
+        <div className="content-header project-content-header"><div className="breadcrumbs"><span className="muted">{text.projects}</span><ChevronRight size={14} /><strong>{localProject?.name ?? 'Local project'}</strong></div><div className="header-actions"><button className="secondary-btn" onClick={() => notify('Raw terminal needs the SSH terminal endpoint, which is not enabled yet')}><TerminalSquare size={15} /> Open terminal</button><button className="secondary-btn" onClick={() => void openDeletedTasks()}><Archive size={15} /> {language === 'zh' ? '历史记录' : 'History'}</button><button className="primary-btn" disabled={quotaExhausted} onClick={() => setNewTaskOpen(true)}><Plus size={16} /> {text.newTask}</button></div></div>
         <section className="project-hero project-page-hero"><div><div className="hero-title"><h1>{localProject?.name ?? 'Local project'}</h1><span className="repo-pill"><FolderGit2 size={13} /> Git repository</span></div><p className="path">{localProject?.path ?? ''}</p></div><div className="branch"><span className="branch-icon">⌘</span> {localProject?.branch ?? '—'} <span className="clean-dot" /> {localProject?.clean ? 'Clean' : 'Changed'}</div></section>
         <div className="section-heading recent-task-heading"><div><span className="eyebrow">{text.projectActivity}</span><h2>{text.recentTasks}<span className="active-task-count"><span className="pulse" />{tasks.filter(task => task.state === 'running').length} {language === 'zh' ? '运行中' : 'running'}</span></h2></div><div className="recent-task-controls"><label className="recent-task-select-label"><span className="sr-only">{text.recentTasks}</span><select className="recent-task-select" value={tasks[activeTask] ? String(activeTask) : ''} onChange={event => { const index = Number(event.target.value); if (Number.isInteger(index)) activateTask(index) }} aria-label={text.recentTasks}><option value="" disabled>{language === 'zh' ? '选择任务' : 'Select a task'}</option>{taskSelectOptions.map(({ task, index, selected }) => <option key={`${task.id}-${index}`} value={index}>{selected ? (language === 'zh' ? '已选择 · ' : 'Selected · ') : `${statusLabel(task.state)} · `}{task.title}</option>)}</select><ChevronDown size={14} /></label><button className={`filter ${taskSearchOpen ? 'active' : ''}`} onClick={() => setTaskSearchOpen(current => !current)} aria-label={text.searchTasks} title={text.searchTasks}><Search size={15} /><span>{text.searchTasks}</span></button></div></div>
         {taskSearchOpen && <div className="task-search"><Search size={15} /><input autoFocus value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder={text.searchTasks} /><button onClick={() => { setTaskQuery(''); setTaskSearchOpen(false) }} aria-label="Close search"><X size={15} /></button></div>}
         <div className="task-preview-workspace" ref={executionWorkspaceRef}>
             {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={collapseExecutionLogs} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={collapseExecutionLogs} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
             <div className="task-preview">
-            <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3>{tasks[activeTask].title}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={() => setTaskMaximized(current => !current)} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
+            <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3>{tasks[activeTask].title}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={toggleTaskMaximized} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
             <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><TaskDuration task={tasks[activeTask]} language={language} /></div>
             {(tasks[activeTask].pendingApprovals ?? []).map(approval => <ApprovalCard key={approval.id} approval={approval} language={language} onRespond={response => respondToApproval(tasks[activeTask], approval.id, response)} />)}
-            <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} />
+            <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} hasOlder={historyCursor != null} loadingOlder={historyLoading} onLoadOlder={loadOlderTaskHistory} />
             {tasks[activeTask].agent === 'Codex' && reasoningOptions.length > 0 && <div className="reasoning-control"><label htmlFor="turn-effort">Reasoning level</label><select id="turn-effort" value={selectedEffort} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onChange={event => changeTaskEffort(event.target.value)} title={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' ? 'The current turn is already using its selected level' : 'Choose a reasoning level for the next turn'}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select><span>Applies to the next turn</span></div>}
             {sent && <div className="sent-note"><span className="pulse" /> Message sent to {tasks[activeTask].agent}</div>}
-            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} disabled={tasks[activeTask].state === 'waiting_for_approval'} language={language} models={models} model={selectedModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || models.length === 0} sendHint={text.sendHint} />
+            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} disabled={quotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={quotaExhausted} language={language} models={models} model={selectedModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || models.length === 0} sendHint={text.sendHint} />
             </div>
         </div></>}
       </main>
     </div>
     {recoverTasksModal}
     {projectPickerOpen && <div className="modal-backdrop" onClick={() => setProjectPickerOpen(false)}><div className="modal project-picker" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">LOCAL PROJECT</span><h2>Choose a Git repository</h2></div><button className="icon-btn" onClick={() => setProjectPickerOpen(false)}><X size={18} /></button></div><p className="picker-path">{directory?.path ?? 'Loading…'}</p>{directory?.parent && <button className="parent-directory" onClick={() => browseDirectory(directory.parent ?? undefined)}>← Parent folder</button>}{projectPickerError && <p className="picker-error">{projectPickerError}</p>}<div className="directory-list">{directory?.items.map(item => <div className="directory-row" key={item.path}><button className="directory-open" onClick={() => browseDirectory(item.path)}><FolderGit2 size={16} /><span>{item.name}</span>{item.isGit && <small>Git repository</small>}</button>{item.isGit && <button className="secondary-btn" onClick={() => selectProject(item.path)}>Select</button>}</div>)}</div><p className="picker-hint">Choose a Git repository to load its local Codex session history.</p></div></div>}
-    {newTaskOpen && <div className="modal-backdrop" onClick={() => setNewTaskOpen(false)}><div className="modal" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">NEW SESSION</span><h2>Start a task</h2></div><button className="icon-btn" onClick={() => setNewTaskOpen(false)}><X size={18} /></button></div><label>Agent<select value={newTaskAgent} onChange={event => setNewTaskAgent(event.target.value as AgentName)}><option>Codex</option><option disabled>Claude (coming soon)</option></select></label>{newTaskAgent === 'Codex' && <><label>Model<select value={selectedModel} disabled={!models.length} onChange={event => setSelectedModel(event.target.value)}>{models.map(model => <option key={model.model} value={model.model}>{model.displayName || model.model}</option>)}</select></label><label>Reasoning level<select value={selectedEffort} disabled={!reasoningOptions.length} onChange={event => setSelectedEffort(event.target.value)}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select></label></>}<button className="secondary-btn" onClick={() => { setNewTaskOpen(false); void openDeletedTasks() }}><Archive size={15} /> {language === 'zh' ? '从历史会话继续' : 'Continue from history'}</button><label>Task<textarea autoFocus value={newTaskTitle} onChange={event => setNewTaskTitle(event.target.value)} placeholder="Describe what you want Codex to do…" /></label><div className="modal-actions"><button className="secondary-btn" onClick={() => setNewTaskOpen(false)}>Cancel</button><button className="primary-btn" onClick={createTask}><Zap size={15} /> Start task</button></div></div></div>}
+    {newTaskOpen && <div className="modal-backdrop" onClick={() => setNewTaskOpen(false)}><div className="modal" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">NEW SESSION</span><h2>Start a task</h2></div><button className="icon-btn" onClick={() => setNewTaskOpen(false)}><X size={18} /></button></div><label>Agent<select value={newTaskAgent} onChange={event => setNewTaskAgent(event.target.value as AgentName)}><option>Codex</option><option disabled>Claude (coming soon)</option></select></label>{newTaskAgent === 'Codex' && <><label>Model<select value={selectedModel} disabled={!models.length} onChange={event => setSelectedModel(event.target.value)}>{models.map(model => <option key={model.model} value={model.model}>{model.displayName || model.model}</option>)}</select></label><label>Reasoning level<select value={selectedEffort} disabled={!reasoningOptions.length} onChange={event => setSelectedEffort(event.target.value)}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select></label></>}<button className="secondary-btn" onClick={() => { setNewTaskOpen(false); void openDeletedTasks() }}><Archive size={15} /> {language === 'zh' ? '从历史会话继续' : 'Continue from history'}</button><label>Task<textarea autoFocus disabled={quotaExhausted} value={newTaskTitle} onChange={event => setNewTaskTitle(event.target.value)} placeholder="Describe what you want Codex to do…" /></label><div className="modal-actions"><button className="secondary-btn" onClick={() => setNewTaskOpen(false)}>Cancel</button><button className="primary-btn" disabled={quotaExhausted} onClick={createTask}><Zap size={15} /> Start task</button></div></div></div>}
     {notice && <div className="demo-toast"><span className="pulse" /> {notice}{noticeAction && <button className="toast-action" onClick={noticeAction.run}>{noticeAction.label}</button>}</div>}
   </div>
 }

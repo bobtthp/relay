@@ -158,11 +158,12 @@ export async function listTaskEvents(taskId: string) {
   }, [])
 }
 
-export async function listTaskHistory(taskId: string) {
-  const response = await authenticatedFetch(`/api/tasks/${taskId}/history`)
+export async function listTaskHistory(taskId: string, before?: string) {
+  const query = before == null ? '' : `?before=${encodeURIComponent(String(before))}`
+  const response = await authenticatedFetch(`/api/tasks/${taskId}/history${query}`)
   if (!response.ok) throw new Error('Unable to load Codex session history')
-  const body = await response.json() as { items: Array<{ role: 'user' | 'assistant'; text: string }> }
-  return Array.isArray(body.items) ? body.items : []
+  const body = await response.json() as { items: Array<{ role: 'user' | 'assistant'; text: string }>; nextCursor?: string | null }
+  return { items: Array.isArray(body.items) ? body.items : [], nextCursor: typeof body.nextCursor === 'string' ? body.nextCursor : null }
 }
 
 export async function getTaskTokenUsage(taskId: string) {

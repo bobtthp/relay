@@ -11,12 +11,13 @@ import { events, machines, projects, refreshProjects, tasks } from './local-stat
 import type { AgentName, PendingApproval, SessionEvent } from '../../protocol/src/types.js'
 import { CodexAppServer, type RpcId } from './codex-app-server.js'
 import { loadProjectCache, saveProjectCache, type DeletedTask } from './project-cache.js'
-import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionTokenUsage, refreshCodexSessionCache, stripInjectedPromptContext } from './codex-history.js'
+import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionHistoryPage, readCodexSessionTokenUsage, refreshCodexSessionCache, stripInjectedPromptContext } from './codex-history.js'
 import { listDirectories, removeSavedProject, saveSelectedProject, validateProjectPath } from './local-project.js'
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
 
 const app = express()
 const server = createServer(app)
+const HISTORY_PAGE_SIZE = 10
 const port = Number(process.env.PORT ?? 3000)
 const host = process.env.RELAY_HOST ?? '0.0.0.0'
 const isLoopbackHost = host === '127.0.0.1' || host === 'localhost' || host === '::1'
@@ -141,6 +142,39 @@ const persist = (projectId?: string) => {
   })
 }
 
+const eventPersistTimers = new Map<string, { debounce: NodeJS.Timeout; maxWait: NodeJS.Timeout }>()
+const scheduleEventPersist = (projectId?: string) => {
+  if (!projectId) return
+  const project = projects.find(item => item.id === projectId)
+  if (!project) return
+  const existing = eventPersistTimers.get(projectId)
+  if (existing) clearTimeout(existing.debounce)
+  const flush = () => {
+    const timers = eventPersistTimers.get(projectId)
+    if (timers) {
+      clearTimeout(timers.debounce)
+      clearTimeout(timers.maxWait)
+      eventPersistTimers.delete(projectId)
+    }
+    persist(projectId)
+  }
+  const debounce = setTimeout(flush, 5_000)
+  debounce.unref()
+  const maxWait = existing?.maxWait ?? setTimeout(flush, 15_000)
+  maxWait.unref()
+  eventPersistTimers.set(projectId, { debounce, maxWait })
+}
+
+const flushEventPersists = () => {
+  const projectIds = [...eventPersistTimers.keys()]
+  for (const timers of eventPersistTimers.values()) {
+    clearTimeout(timers.debounce)
+    clearTimeout(timers.maxWait)
+  }
+  eventPersistTimers.clear()
+  for (const projectId of projectIds) persist(projectId)
+}
+
 const assignRemoteSession = (task: typeof tasks[number], sessionId: string) => {
   task.remoteSessionId = sessionId
   // A history scan can discover a newly created session before startThread has
@@ -154,31 +188,11 @@ const assignRemoteSession = (task: typeof tasks[number], sessionId: string) => {
   }
 }
 
-const addDiscoveredTasks = (discovered: typeof tasks) => {
-  for (let index = tasks.length - 1; index >= 0; index--) {
-    const candidate = tasks[index]
-    const sessionId = candidate.remoteSessionId
-    if (sessionId && candidate.id === `codex-${sessionId}` && tasks.some(owner => owner !== candidate && (owner.remoteSessionAliases ?? []).includes(sessionId))) tasks.splice(index, 1)
-  }
-  const seen = new Set<string>()
-  for (let index = 0; index < tasks.length; index++) {
-    const sessionId = tasks[index].remoteSessionId
-    if (!sessionId) continue
-    if (seen.has(sessionId)) { tasks.splice(index, 1); index-- }
-    else seen.add(sessionId)
-  }
-  for (const task of discovered) {
-    if (!task.remoteSessionId || hiddenCodexSessionIds.has(task.remoteSessionId) || seen.has(task.remoteSessionId) || tasks.some(existing => (existing.remoteSessionAliases ?? []).includes(task.remoteSessionId!))) continue
-    tasks.push(task)
-    seen.add(task.remoteSessionId)
-  }
-}
-
 const appendEvent = (event: SessionEvent) => {
   event.sequence = (eventSequences.get(event.taskId) ?? 0) + 1
   eventSequences.set(event.taskId, event.sequence)
   events.push(event)
-  persist(tasks.find(task => task.id === event.taskId)?.projectId)
+  scheduleEventPersist(tasks.find(task => task.id === event.taskId)?.projectId)
   broadcast({ type: 'session_event', event })
 }
 
@@ -202,7 +216,7 @@ const upsertProgressEvent = (taskId: string, progressKey: string, text: string, 
   if (existing) {
     existing.payload = { ...existing.payload, text: nextText, progressState, logType }
     existing.createdAt = new Date().toISOString()
-    persist(tasks.find(task => task.id === taskId)?.projectId)
+    scheduleEventPersist(tasks.find(task => task.id === taskId)?.projectId)
     broadcast({ type: 'session_event', event: existing })
     return
   }
@@ -284,6 +298,35 @@ const makeApprovalResponse = (kind: PendingApproval['kind'], decision: 'accept' 
     return { permissions, scope: 'turn' }
   }
   return { decision }
+}
+
+const getDefaultMcpFormResponse = (requestedSchema: Record<string, unknown> | undefined) => {
+  if (requestedSchema?.type !== 'object') return undefined
+  const properties = asRecord(requestedSchema.properties) ?? {}
+  const required = Array.isArray(requestedSchema.required)
+    ? requestedSchema.required.filter((key): key is string => typeof key === 'string')
+    : []
+  const content: Record<string, unknown> = {}
+
+  for (const key of required) {
+    const property = asRecord(properties[key])
+    if (!property || !Object.hasOwn(property, 'default')) return undefined
+  }
+
+  for (const [key, rawProperty] of Object.entries(properties)) {
+    const property = asRecord(rawProperty)
+    if (!property || !Object.hasOwn(property, 'default')) continue
+    const value = property.default
+    const valid = property.type === 'boolean'
+      ? typeof value === 'boolean'
+      : property.type === 'number' || property.type === 'integer'
+        ? typeof value === 'number' && Number.isFinite(value) && (property.type !== 'integer' || Number.isInteger(value))
+        : property.type === 'string' && typeof value === 'string'
+    if (!valid || (Array.isArray(property.enum) && !property.enum.includes(value))) return undefined
+    content[key] = value
+  }
+
+  return { action: 'accept', content, _meta: null }
 }
 
 const isThreadNotFound = (error: unknown) => error instanceof Error && /thread\s+not\s+found|unknown\s+thread/i.test(error.message)
@@ -410,14 +453,22 @@ codex.onServerRequest(message => {
     ...(questions ? { questions } : {}),
   }
   pendingApprovalRequests.set(requestId, { taskId: task.id, itemId, rpcId: message.id, kind, ...(requestedPermissions ? { requestedPermissions } : {}), ...(requestedSchema ? { requestedSchema } : {}), ...(questions ? { questions } : {}) })
-  if (approvalSettings.autoApproveConfirmations && approval.canApprove && automaticApprovalKinds.has(kind)) {
+  const automaticFormResponse = approvalSettings.autoAcceptDefaultMcpForms && approval.canApprove && kind === 'mcp_form'
+    ? getDefaultMcpFormResponse(requestedSchema)
+    : undefined
+  const automaticResponse = approvalSettings.autoApproveConfirmations && approval.canApprove && automaticApprovalKinds.has(kind)
+    ? { decision: 'accept' }
+    : automaticFormResponse
+  if (automaticResponse) {
     try {
-      answerApproval(task, requestId, { decision: 'accept' })
+      answerApproval(task, requestId, automaticResponse)
       appendEvent({
         id: `event-${randomUUID()}`,
         taskId: task.id,
         type: 'assistant_message',
-        payload: { text: `Relay automatically approved this ${kind.replace('_', ' ')} request.`, method: 'relay/auto-approval', approvalKind: kind, logType: 'status' },
+        payload: { text: kind === 'mcp_form'
+          ? 'Relay automatically accepted this MCP form using its schema defaults.'
+          : `Relay automatically approved this ${kind.replace('_', ' ')} request.`, method: 'relay/auto-approval', approvalKind: kind, logType: 'status' },
         sequence: 0,
         createdAt: new Date().toISOString(),
       })
@@ -605,8 +656,14 @@ app.use(express.json({ limit: '64kb' }))
 
 app.get('/api/settings/approvals', (_request, response) => response.json(approvalSettings))
 app.put('/api/settings/approvals', (request, response) => {
-  if (typeof request.body?.autoApproveConfirmations !== 'boolean') return response.status(400).json({ error: 'autoApproveConfirmations must be a boolean' })
-  const nextSettings = { autoApproveConfirmations: request.body.autoApproveConfirmations }
+  const body = asRecord(request.body)
+  if (!body || (typeof body.autoApproveConfirmations !== 'boolean' && typeof body.autoAcceptDefaultMcpForms !== 'boolean')) {
+    return response.status(400).json({ error: 'At least one approval setting must be a boolean' })
+  }
+  const nextSettings = {
+    autoApproveConfirmations: typeof body.autoApproveConfirmations === 'boolean' ? body.autoApproveConfirmations : approvalSettings.autoApproveConfirmations,
+    autoAcceptDefaultMcpForms: typeof body.autoAcceptDefaultMcpForms === 'boolean' ? body.autoAcceptDefaultMcpForms : approvalSettings.autoAcceptDefaultMcpForms,
+  }
   writeApprovalSettings(nextSettings)
   approvalSettings = nextSettings
   broadcast({ type: 'approval_settings', settings: approvalSettings })
@@ -683,10 +740,6 @@ app.post('/api/projects/select', (request, response) => {
     const localProject = projects.find(project => project.path === projectPath)
     if (!localProject) throw new Error('Selected project is unavailable')
     hydrateProjectCache(localProject)
-    refreshCodexSessionCache()
-    const discovered = discoverCodexTasks(localProject.id, localProject.path)
-    addDiscoveredTasks(discovered)
-    persist(localProject.id)
     return response.json(localProject)
   } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : 'Unable to select project' }) }
 })
@@ -708,14 +761,22 @@ app.delete('/api/projects/:projectId', (request, response) => {
   } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : 'Unable to remove workspace' }) }
 })
 
+app.get('/api/projects/:projectId/task-status', (request, response) => {
+  const project = projects.find(item => item.id === request.params.projectId)
+  if (!project) return response.status(404).json({ error: 'Project not found' })
+  return response.json({ items: tasks.filter(task => task.projectId === project.id).map(task => ({
+    id: task.id,
+    status: task.status,
+    executionStartedAt: task.executionStartedAt ?? null,
+    executionDurationMs: task.executionDurationMs,
+    pendingApprovals: task.pendingApprovals ?? [],
+  })) })
+})
+
 app.get('/api/projects/:projectId/tasks', (request, response) => {
   const project = projects.find(item => item.id === request.params.projectId)
   if (project) {
     hydrateProjectCache(project)
-    refreshCodexSessionCache()
-    const discovered = discoverCodexTasks(project.id, project.path)
-    addDiscoveredTasks(discovered)
-    persist(project.id)
   }
   return response.json({ items: tasks.filter(task => task.projectId === request.params.projectId).map(({ tokenUsage: _tokenUsage, ...task }) => ({
     ...task,
@@ -832,8 +893,13 @@ app.get('/api/tasks/:taskId/history', async (request, response) => {
   const task = tasks.find(item => item.id === request.params.taskId)
   if (!task) return response.status(404).json({ error: 'Task not found' })
   if (!task.remoteSessionId) return response.json({ thread: null })
-  const localHistory = readCodexSessionHistory(task.remoteSessionId)
-  if (localHistory.length) return response.json({ items: localHistory, source: 'local_transcript' })
+  const cursorValue = typeof request.query.before === 'string' ? request.query.before : undefined
+  const fileCursor = cursorValue?.match(/^file:(\d+)$/)
+  const threadCursor = cursorValue?.match(/^thread:(\d+)$/)
+  if (fileCursor || !cursorValue) {
+    const localHistory = readCodexSessionHistoryPage(task.remoteSessionId, fileCursor ? Number(fileCursor[1]) : undefined)
+    if (localHistory.available && (localHistory.items.length || fileCursor)) return response.json({ items: localHistory.items, nextCursor: localHistory.nextCursor, source: 'local_transcript' })
+  }
   try {
     const result = await codex.readThread(task.remoteSessionId)
     const source = result as { thread?: { turns?: Array<{ items?: Array<Record<string, unknown>> }> }; turns?: Array<{ items?: Array<Record<string, unknown>> }> }
@@ -846,7 +912,9 @@ app.get('/api/tasks/:taskId/history', async (request, response) => {
       const text = type === 'userMessage' ? stripInjectedPromptContext(rawText) : rawText
       return text ? [{ role: type === 'userMessage' ? 'user' : 'assistant', text }] : []
     })
-    return response.json({ items: items.slice(-100) })
+    const end = Math.min(threadCursor ? Number(threadCursor[1]) : items.length, items.length)
+    const start = Math.max(0, end - HISTORY_PAGE_SIZE)
+    return response.json({ items: items.slice(start, end), nextCursor: start > 0 ? `thread:${start}` : null })
   }
   catch (error) {
     const localHistory = readCodexSessionHistory(task.remoteSessionId)
@@ -1003,6 +1071,7 @@ server.listen(port, host, () => {
 const shutdown = () => {
   if (shuttingDown) return
   shuttingDown = true
+  flushEventPersists()
   const now = new Date()
   for (const task of tasks) {
     if (task.status !== 'running' && task.status !== 'waiting_for_approval') continue

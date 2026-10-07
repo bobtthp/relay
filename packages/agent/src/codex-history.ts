@@ -10,6 +10,7 @@ const indexPath = path.join(codexHome, 'session_index.jsonl')
 const MAX_SESSION_METADATA_BYTES = 1024 * 1024
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024
 const MAX_HISTORY_MESSAGES = 100
+const HISTORY_PAGE_MESSAGES = 10
 const MAX_HISTORY_MESSAGE_CHARS = 32_000
 const MAX_HISTORY_TOTAL_CHARS = 240_000
 let sessionCache: { loadedAt: number; data: ReturnType<typeof readSessionData> } | undefined
@@ -167,6 +168,55 @@ export function readCodexSessionHistory(sessionId: string): Array<{ role: 'user'
     totalCharacters -= messages.shift()!.text.length
   }
   return messages
+}
+
+export function readCodexSessionHistoryPage(sessionId: string, before?: number): { items: Array<{ role: 'user' | 'assistant'; text: string }>; nextCursor: string | null; available: boolean } {
+  if (!sessionCache || Date.now() - sessionCache.loadedAt > 60_000) sessionCache = { loadedAt: Date.now(), data: readSessionData() }
+  const session = sessionCache.data.get(sessionId)
+  if (!session) return { items: [], nextCursor: null, available: false }
+  let descriptor: number | undefined
+  try {
+    descriptor = fs.openSync(session.file, 'r')
+    const fileSize = fs.fstatSync(descriptor).size
+    const end = Math.min(Math.max(0, before ?? fileSize), fileSize)
+    if (!end) return { items: [], nextCursor: null, available: true }
+    const start = Math.max(0, end - MAX_HISTORY_BYTES)
+    const buffer = Buffer.allocUnsafe(end - start)
+    fs.readSync(descriptor, buffer, 0, buffer.length, start)
+    const firstNewline = start > 0 ? buffer.indexOf(10) : -1
+    const usableStart = start > 0 && firstNewline >= 0 ? start + firstNewline + 1 : start
+    const lines = buffer.toString('utf8').split('\n')
+    const items: Array<{ role: 'user' | 'assistant'; text: string; start: number }> = []
+    let byteOffset = start
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]
+      const lineStart = byteOffset
+      byteOffset += Buffer.byteLength(line, 'utf8') + (index < lines.length - 1 ? 1 : 0)
+      if (lineStart < usableStart) continue
+      try {
+        const row = JSON.parse(line) as { type?: string; payload?: { type?: string; role?: string; message?: string; content?: Array<{ text?: string }> } }
+        const payload = row.payload
+        const role: 'user' | 'assistant' | undefined = row.type === 'response_item' && payload?.type === 'message'
+          ? payload.role === 'user' ? 'user' : payload.role === 'assistant' ? 'assistant' : undefined
+          : row.type === 'event_msg' ? payload?.type === 'user_message' ? 'user' : payload?.type === 'agent_message' ? 'assistant' : undefined
+            : undefined
+        const text = row.type === 'event_msg' ? payload?.message ?? '' : payload?.content?.map(part => part.text ?? '').filter(Boolean).join('\n') ?? ''
+        const cleaned = role === 'user' ? stripInjectedPromptContext(text) : text
+        if (!role || !cleaned) continue
+        items.push({ role, text: cleaned.length > MAX_HISTORY_MESSAGE_CHARS ? `${cleaned.slice(0, MAX_HISTORY_MESSAGE_CHARS)}\n\n[Earlier content omitted for display.]` : cleaned, start: lineStart })
+      } catch { /* Ignore partial or malformed rows. */ }
+    }
+    const page = items.slice(-HISTORY_PAGE_MESSAGES)
+    let totalCharacters = page.reduce((total, item) => total + item.text.length, 0)
+    while (page.length && totalCharacters > MAX_HISTORY_TOTAL_CHARS) totalCharacters -= page.shift()!.text.length
+    const pageStart = page[0]?.start ?? usableStart
+    const nextCursor = pageStart > 0 ? `file:${pageStart}` : null
+    return { items: page.map(({ role, text }) => ({ role, text })), nextCursor, available: true }
+  } catch {
+    return { items: [], nextCursor: null, available: false }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor)
+  }
 }
 
 export function readCodexSessionTokenUsage(sessionId: string): TokenUsage | undefined {
