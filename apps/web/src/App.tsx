@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Archive, ChevronDown, ChevronRight,
+  Archive, Check, ChevronDown, ChevronRight, Copy,
   Code2, FolderGit2, Laptop, Menu, MessageSquare, MoreHorizontal,
   Maximize2, Minimize2, Plus, Search, Settings, Sparkles, Square, TerminalSquare, Trash2, X, Zap,
 } from 'lucide-react'
@@ -18,12 +18,28 @@ const copy = {
 } as const
 
 type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt: number }
-type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null }
+type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null; normalModelSlug?: string }
 const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && limit.resetsAt * 1_000 > Date.now()))
+type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
+const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
+const quotaForModel = (model: string | undefined, rateLimitsByLimitId: Record<string, RateLimits>, fallback: RateLimits | null) => {
+  const limitId = quotaLimitIdForModel(model)
+  // A depleted provider pool must not disable a different provider that still has quota.
+  return rateLimitsByLimitId[limitId] ?? (limitId === 'base_model_inference' ? rateLimitsByLimitId.luna ?? null : fallback)
+}
+const isLunaModel = (model: string | Pick<CodexModel, 'model' | 'displayName'> | undefined) => {
+  const value = typeof model === 'string' ? model : model ? `${model.model} ${model.displayName}` : ''
+  return value.toLowerCase().includes('luna')
+}
 type EnvironmentItem = { id?: 'codex' | 'claude'; label: string; installed: boolean; version?: string; status?: 'installing' | 'failed'; detail?: string }
 type CompletionSound = 'chime' | 'bell' | 'digital'
 const CODEX_MODEL_REFRESH_MS = 24 * 60 * 60 * 1_000
 const CHAT_HISTORY_PAGE_SIZE = 10
+
+function truncateTaskTitle(title: string, maxLength = 30) {
+  const characters = Array.from(title)
+  return characters.length > maxLength ? `${characters.slice(0, maxLength).join('')}…` : title
+}
 
 function formatTime(timestamp: string) {
   return new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestamp))
@@ -80,7 +96,33 @@ const ExecutionLogPanel = memo(function ExecutionLogPanel({ logs, taskState, lan
 })
 
 const ChatMessage = memo(function ChatMessage({ message, agent, language }: { message: TranscriptMessage; agent: AgentName; language: 'en' | 'zh' }) {
-  return <div className={`preview-event session-message ${message.role}`}><div className="event-marker"><MessageSquare size={14} /></div><div><strong>{message.role === 'user' ? 'You' : agent}{message.createdAt && <span className="event-time">{formatTime(message.createdAt)}</span>}</strong><div className="markdown-output message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div></div></div>
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const copyReply = async () => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(message.text)
+      else {
+        const input = document.createElement('textarea')
+        input.value = message.text
+        input.style.position = 'fixed'
+        input.style.opacity = '0'
+        document.body.append(input)
+        input.select()
+        const copied = document.execCommand('copy')
+        input.remove()
+        if (!copied) throw new Error('Clipboard copy was denied')
+      }
+      setCopyState('copied')
+    } catch {
+      setCopyState('failed')
+    }
+    window.setTimeout(() => setCopyState('idle'), 1800)
+  }
+  const buttonLabel = copyState === 'copied'
+    ? (language === 'zh' ? '已复制' : 'Copied')
+    : copyState === 'failed'
+      ? (language === 'zh' ? '复制失败' : 'Copy failed')
+      : (language === 'zh' ? '复制回复' : 'Copy response')
+  return <div className={`preview-event session-message ${message.role}`}><div className="event-marker"><MessageSquare size={14} /></div><div><strong>{message.role === 'user' ? 'You' : agent}{message.createdAt && <span className="event-time">{formatTime(message.createdAt)}</span>}</strong><div className="markdown-output message-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown></div>{message.role === 'assistant' && <div className="assistant-message-actions"><button className={`copy-reply-btn${copyState === 'copied' ? ' copied' : ''}${copyState === 'failed' ? ' failed' : ''}`} onClick={() => void copyReply()} aria-label={buttonLabel} title={buttonLabel}>{copyState === 'copied' ? <Check size={13} /> : <Copy size={13} />}<span>{buttonLabel}</span></button></div>}</div></div>
 }, (previous, next) => previous.agent === next.agent && previous.language === next.language && previous.message.id === next.message.id && previous.message.role === next.message.role && previous.message.text === next.message.text && previous.message.createdAt === next.message.createdAt)
 
 const ChatTranscript = memo(function ChatTranscript({ messages, agent, language, hasOlder, loadingOlder, onLoadOlder }: { messages: TranscriptMessage[]; agent: AgentName; language: 'en' | 'zh'; hasOlder: boolean; loadingOlder: boolean; onLoadOlder: () => void }) {
@@ -195,6 +237,7 @@ const TaskComposer = memo(function TaskComposer({
   agent,
   disabled,
   quotaBlocked,
+  quotaModel,
   language,
   models,
   model,
@@ -205,6 +248,7 @@ const TaskComposer = memo(function TaskComposer({
   agent: AgentName
   disabled: boolean
   quotaBlocked: boolean
+  quotaModel: string
   language: 'en' | 'zh'
   models: CodexModel[]
   model: string
@@ -218,7 +262,7 @@ const TaskComposer = memo(function TaskComposer({
     setDraft('')
   }
 
-  return <div className="composer"><div className="composer-model-row"><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={disabled} placeholder={quotaBlocked ? (language === 'zh' ? 'Codex 额度已用完，重置后可继续输入' : 'Codex quota exhausted. You can continue after it resets.') : disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{quotaBlocked ? (language === 'zh' ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
+  return <div className="composer"><div className="composer-model-row"><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={disabled} placeholder={quotaBlocked ? (language === 'zh' ? `${quotaModel} 额度已用完，请切换到 Luna 或等待额度重置` : `${quotaModel} quota exhausted. Switch to Luna or wait for the quota reset.`) : disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{quotaBlocked ? (language === 'zh' ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
 })
 
 let completionAudioContext: AudioContext | undefined
@@ -245,7 +289,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [activeTask, setActiveTask] = useState(0)
   const [taskMaximized, setTaskMaximized] = useState(false)
-  const [executionLogsCollapsed, setExecutionLogsCollapsed] = useState(() => window.innerWidth <= 1024)
+  const [executionLogsCollapsed, setExecutionLogsCollapsed] = useState(true)
   const collapseExecutionLogs = useCallback(() => setExecutionLogsCollapsed(true), [])
   const [executionLogWidth, setExecutionLogWidth] = useState(() => {
     const savedWidth = Number(localStorage.getItem('relay-execution-log-width'))
@@ -300,7 +344,7 @@ function App() {
   const [directory, setDirectory] = useState<{ path: string; parent: string | null; items: Array<{ name: string; path: string; isGit: boolean }> } | null>(null)
   const [projectPickerError, setProjectPickerError] = useState('')
   const [rateLimit, setRateLimit] = useState<RateLimits | null>(null)
-  const quotaExhausted = quotaIsExhausted(rateLimit)
+  const [rateLimitsByLimitId, setRateLimitsByLimitId] = useState<Record<string, RateLimits>>({})
   const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
@@ -410,6 +454,28 @@ function App() {
   const statusLabel = (state: Task['state']) => ({ running: text.running, completed: text.completed, failed: language === 'zh' ? '失败' : 'Failed', interrupted: language === 'zh' ? '已中断' : 'Interrupted', waiting_for_approval: language === 'zh' ? '等待批准' : 'Waiting for approval' })[state]
   const selectedModelInfo = models.find(model => model.model === selectedModel)
   const reasoningOptions = selectedModelInfo?.supportedReasoningEfforts ?? []
+  const lunaQuota = rateLimitsByLimitId.base_model_inference ?? rateLimitsByLimitId.luna ?? null
+  const preferredLunaModel = lunaQuota?.normalModelSlug
+  const lunaModel = models.find(model => model.model === preferredLunaModel) ?? models.find(isLunaModel)
+  const selectedModelQuota = quotaForModel(selectedModel, rateLimitsByLimitId, rateLimit)
+  const shouldUseLunaReserve = lunaModel && !quotaIsExhausted(lunaQuota) && (
+    (!isLunaModel(selectedModel) && quotaIsExhausted(selectedModelQuota)) ||
+    (isLunaModel(selectedModel) && preferredLunaModel && selectedModel !== preferredLunaModel)
+  )
+  const effectiveModel = shouldUseLunaReserve
+    ? lunaModel.model
+    : selectedModel
+  const effectiveModelInfo = models.find(model => model.model === effectiveModel)
+  const effectiveEffort = effectiveModelInfo?.supportedReasoningEfforts?.some(option => option.reasoningEffort === selectedEffort)
+    ? selectedEffort
+    : effectiveModelInfo?.defaultReasoningEffort ?? effectiveModelInfo?.supportedReasoningEfforts?.[0]?.reasoningEffort ?? selectedEffort
+  const quotaExhausted = quotaIsExhausted(quotaForModel(effectiveModel, rateLimitsByLimitId, rateLimit))
+  useEffect(() => {
+    const task = tasks[activeTask]
+    if (!effectiveModel || effectiveModel === selectedModel || task?.state === 'running' || task?.state === 'waiting_for_approval') return
+    setSelectedModel(effectiveModel)
+    setSelectedEffort(effectiveEffort)
+  }, [activeTask, effectiveEffort, effectiveModel, selectedModel, tasks])
   const playCompletionTone = () => {
     if (!completionSoundSettings.current.enabled) return
     try {
@@ -619,9 +685,11 @@ function App() {
   useEffect(() => {
     const loadRateLimit = () => {
       void authenticatedFetch('/api/account/rate-limits').then(async response => {
-        const body = await response.json() as { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
+        const body = await response.json() as RateLimitResponse
         if (!response.ok) return
-        setRateLimit(body.rateLimitsByLimitId?.codex ?? body.rateLimits ?? null)
+        const limitsById = body.rateLimitsByLimitId ?? {}
+        setRateLimitsByLimitId(limitsById)
+        setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
       }).catch(() => undefined)
     }
     loadRateLimit()
@@ -638,8 +706,10 @@ function App() {
     const timer = window.setTimeout(() => {
       void authenticatedFetch('/api/account/rate-limits').then(async response => {
         if (!response.ok) return
-        const body = await response.json() as { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
-        setRateLimit(body.rateLimitsByLimitId?.codex ?? body.rateLimits ?? null)
+        const body = await response.json() as RateLimitResponse
+        const limitsById = body.rateLimitsByLimitId ?? {}
+        setRateLimitsByLimitId(limitsById)
+        setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
       }).catch(() => undefined)
     }, Math.max(0, resetAt - Date.now() + 500))
     return () => window.clearTimeout(timer)
@@ -714,6 +784,8 @@ function App() {
             progressState?: 'running' | 'completed'
             error?: boolean
             stderr?: boolean
+            code?: string
+            model?: string
           }
         }
       }
@@ -743,6 +815,12 @@ function App() {
           const itemId = message.event.payload?.itemId
           const role = message.event.type === 'user_message' ? 'user' as const : isFinalAssistantMessage(method) ? 'assistant' as const : 'progress' as const
           const logType = message.event.payload?.error || message.event.type === 'error' ? 'error' : message.event.type === 'test_result' ? 'test' : message.event.payload?.logType ?? (message.event.payload?.stderr ? 'warning' : undefined)
+          const exhaustedModel = message.event.payload?.model ?? ''
+          if (message.event.type === 'error' && text) notify(message.event.payload?.code === 'quota_exhausted'
+            ? language === 'zh'
+              ? exhaustedModel.toLowerCase().includes('luna') ? 'Luna 额度已用完，请等待额度重置或切换到其他可用模型。' : `模型 ${exhaustedModel || '当前模型'} 的额度已用完，请切换到 Luna 或等待额度重置。`
+              : text
+            : text)
           if (text) queueLiveEvent({ id: message.event.id, taskId: message.event.taskId, text, method, itemId, createdAt: message.event.createdAt, role, eventType: message.event.type, logType, progressState: message.event.payload?.progressState })
       } catch { /* Ignore non-JSON socket messages. */ }
       }
@@ -761,7 +839,7 @@ function App() {
       liveEventFrame.current = null
       pendingLiveEvents.current = []
     }
-  }, [localProject?.id])
+  }, [localProject?.id, language])
 
   useEffect(() => {
     loadTaskEvents(tasks[activeTask]?.id)
@@ -785,11 +863,16 @@ function App() {
   }, [activeView, activityRefresh, activityTaskKey])
 
   const sendMessage = (draft: string) => {
-    if (quotaIsExhausted(rateLimit)) return
+    if (quotaExhausted) return
     if (!draft.trim() || tasks[activeTask].state === 'waiting_for_approval') return
     const message = draft.trim()
     const task = tasks[activeTask]
-    void apiAgentService.sendMessage(task, message, selectedModel || undefined, selectedEffort || undefined).then(() => {
+    if (effectiveModel && effectiveModel !== selectedModel) {
+      setSelectedModel(effectiveModel)
+      setSelectedEffort(effectiveEffort)
+      notify(language === 'zh' ? '原模型额度已用完，已切换到 Luna' : 'The current model quota is exhausted. Switched to Luna.')
+    }
+    void apiAgentService.sendMessage(task, message, effectiveModel || undefined, effectiveEffort || undefined).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to send message'))
@@ -832,9 +915,14 @@ function App() {
   }
 
   const createTask = () => {
-    if (quotaIsExhausted(rateLimit)) return
+    if (quotaExhausted) return
     if (!newTaskTitle.trim()) return
-    void apiAgentService.createTask(newTaskAgent, newTaskTitle.trim(), selectedModel || undefined, selectedEffort || undefined).then(task => {
+    if (effectiveModel && effectiveModel !== selectedModel) {
+      setSelectedModel(effectiveModel)
+      setSelectedEffort(effectiveEffort)
+      notify(language === 'zh' ? '原模型额度已用完，已切换到 Luna' : 'The current model quota is exhausted. Switched to Luna.')
+    }
+    void apiAgentService.createTask(newTaskAgent, newTaskTitle.trim(), effectiveModel || undefined, effectiveEffort || undefined).then(task => {
       setTasks(current => [task, ...current])
       setActiveTask(0)
       setNewTaskTitle('')
@@ -1066,13 +1154,13 @@ function App() {
         <div className="task-preview-workspace" ref={executionWorkspaceRef}>
             {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={collapseExecutionLogs} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={collapseExecutionLogs} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
             <div className="task-preview">
-            <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3>{tasks[activeTask].title}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={toggleTaskMaximized} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
+            <div className="preview-top"><div><span className="eyebrow">{text.selectedTask}</span><h3 title={tasks[activeTask].title}>{truncateTaskTitle(tasks[activeTask].title)}</h3></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={toggleTaskMaximized} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
             <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><TaskDuration task={tasks[activeTask]} language={language} /></div>
             {(tasks[activeTask].pendingApprovals ?? []).map(approval => <ApprovalCard key={approval.id} approval={approval} language={language} onRespond={response => respondToApproval(tasks[activeTask], approval.id, response)} />)}
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} hasOlder={historyCursor != null} loadingOlder={historyLoading} onLoadOlder={loadOlderTaskHistory} />
             {tasks[activeTask].agent === 'Codex' && reasoningOptions.length > 0 && <div className="reasoning-control"><label htmlFor="turn-effort">Reasoning level</label><select id="turn-effort" value={selectedEffort} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onChange={event => changeTaskEffort(event.target.value)} title={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' ? 'The current turn is already using its selected level' : 'Choose a reasoning level for the next turn'}>{reasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select><span>Applies to the next turn</span></div>}
             {sent && <div className="sent-note"><span className="pulse" /> Message sent to {tasks[activeTask].agent}</div>}
-            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} disabled={quotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={quotaExhausted} language={language} models={models} model={selectedModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || models.length === 0} sendHint={text.sendHint} />
+            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} disabled={quotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={quotaExhausted} quotaModel={selectedModel || (language === 'zh' ? '当前模型' : 'Current model')} language={language} models={models} model={selectedModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || models.length === 0} sendHint={text.sendHint} />
             </div>
         </div></>}
       </main>

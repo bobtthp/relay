@@ -91,7 +91,14 @@ export class CodexAppServer {
 
   async resumeThread(threadId: string, cwd: string) { await this.ensureStarted(); await this.request('thread/resume', { threadId, cwd }) }
   async injectItems(threadId: string, items: Array<Record<string, unknown>>) { await this.ensureStarted(); await this.request('thread/inject_items', { threadId, items }) }
-  async startTurn(threadId: string, text: string, cwd: string, model?: string, effort?: string) { await this.ensureStarted(); await this.request('turn/start', { threadId, cwd, ...(model ? { model } : {}), ...(effort ? { effort } : {}), input: [{ type: 'text', text }] }) }
+  async startTurn(threadId: string, text: string, cwd: string, model?: string, effort?: string) {
+    await this.ensureStarted()
+    // Luna is the display model for the reserve quota, but the app-server
+    // route must use the hidden reserve model id. Sending gpt-5.6-luna or
+    // gpt-6-luna directly uses the regular model quota and can be rejected.
+    const explicitModel = model?.toLowerCase().includes('luna') ? 'gpt-reserve' : model
+    await this.request('turn/start', { threadId, cwd, ...(explicitModel ? { model: explicitModel } : {}), ...(effort ? { effort } : {}), input: [{ type: 'text', text }] })
+  }
   async steerTurn(threadId: string, turnId: string, text: string) { await this.ensureStarted(); await this.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] }) }
   async interruptTurn(threadId: string, turnId: string) { await this.ensureStarted(); await this.request('turn/interrupt', { threadId, turnId }) }
   async readThread(threadId: string) { await this.ensureStarted(); return this.request('thread/read', { threadId, includeTurns: true }) }

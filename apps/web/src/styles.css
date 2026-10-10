@@ -138,6 +138,11 @@
 .session-message.progress .event-marker { background:#1c3030; color:#80b8aa; }
 .session-message.progress .markdown-output { color:#9aaba9; font-size:11px; }
 .session-message .message-markdown { color:#c9d0d9; font-size:13px; line-height:1.6; white-space:normal; overflow-wrap:anywhere; word-break:normal; text-wrap:pretty; }
+.assistant-message-actions { display:flex; justify-content:flex-end; margin-top:7px; }
+.copy-reply-btn { display:inline-flex; align-items:center; gap:5px; padding:4px 7px; border:1px solid transparent; border-radius:5px; color:#8290a1; background:transparent; font:10px 'DM Sans', sans-serif; opacity:.72; }
+.copy-reply-btn:hover { border-color:#303846; color:#d9d4f7; background:#181d27; opacity:1; }
+.copy-reply-btn.copied { color:#83d7b3; opacity:1; }
+.copy-reply-btn.failed { color:#f0a0a0; opacity:1; }
 .session-message .message-markdown > :first-child { margin-top:0; }
 .session-message .message-markdown > :last-child { margin-bottom:0; }
 .session-message .message-markdown p { margin:9px 0; line-height:1.6; }

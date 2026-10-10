@@ -230,6 +230,13 @@ const upsertProgressEvent = (taskId: string, progressKey: string, text: string, 
   })
 }
 
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
+const isQuotaError = (text: string) => /(?:rate.?limit|quota|usage limit|too many requests|capacity|credits?)/i.test(text)
+const isLunaModelName = (model?: string) => model?.toLowerCase().includes('luna') === true
+const quotaErrorText = (task: typeof tasks[number]) => isLunaModelName(task.model)
+  ? `The ${task.model ?? 'Luna'} quota is exhausted. Wait for the quota reset or choose another available model.`
+  : `The ${task.model ?? 'current model'} quota is exhausted. Switch to Luna if it still has quota, or wait for the quota reset.`
+
 const failTask = (task: typeof tasks[number], error: unknown) => {
   const now = new Date()
   pauseTaskTimer(task, now)
@@ -244,10 +251,13 @@ const failTask = (task: typeof tasks[number], error: unknown) => {
     return
   }
   task.status = 'failed'
+  task.activeTurnId = undefined
   task.lastActivityAt = now.toISOString()
   activeCodexTasks.delete(task.id)
   persist(task.projectId)
-  appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'error', payload: { text: error instanceof Error ? error.message : String(error), error: true, logType: 'error' }, sequence: 0, createdAt: new Date().toISOString() })
+  const originalText = errorText(error)
+  const quotaExhausted = isQuotaError(originalText)
+  appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'error', payload: { text: quotaExhausted ? quotaErrorText(task) : originalText, error: true, logType: 'error', ...(quotaExhausted ? { code: 'quota_exhausted', model: task.model } : {}) }, sequence: 0, createdAt: new Date().toISOString() })
   broadcastTaskStatus(task)
 }
 
@@ -628,9 +638,19 @@ codex.onNotification(message => {
     const itemId = typeof completedItem?.id === 'string' ? completedItem.id : typeof params.itemId === 'string' ? params.itemId : undefined
     if (itemId) fileChangePreviews.delete(`${threadId}:${itemId}`)
   }
-  const turn = params.turn as { id?: string } | undefined
-  if (message.method === 'turn/started' && turn?.id) { task.activeTurnId = turn.id; resumeTaskTimer(task); persist(task.projectId) }
-  if (message.method === 'turn/completed') { const now = new Date(); pauseTaskTimer(task, now); forgetTaskApprovals(task); for (const key of fileChangePreviews.keys()) if (key.startsWith(`${threadId}:`)) fileChangePreviews.delete(key); task.activeTurnId = undefined; task.status = 'completed'; task.lastActivityAt = now.toISOString(); activeCodexTasks.delete(task.id); persist(task.projectId); broadcastTaskStatus(task) }
+  const turn = asRecord(params.turn)
+  if (message.method === 'turn/started' && typeof turn?.id === 'string') { task.activeTurnId = turn.id; resumeTaskTimer(task); persist(task.projectId) }
+  if (message.method === 'turn/completed') {
+    const turnError = asRecord(turn?.error)
+    const failureText = typeof turnError?.message === 'string' ? turnError.message : typeof turn?.error === 'string' ? turn.error : undefined
+    const turnStatus = typeof turn?.status === 'string' ? turn.status : 'completed'
+    if (task.status === 'failed') return
+    if (turnStatus === 'failed' || failureText) {
+      failTask(task, new Error(failureText ?? 'Codex turn failed'))
+      return
+    }
+    const now = new Date(); pauseTaskTimer(task, now); forgetTaskApprovals(task); for (const key of fileChangePreviews.keys()) if (key.startsWith(`${threadId}:`)) fileChangePreviews.delete(key); task.activeTurnId = undefined; task.status = turnStatus === 'interrupted' ? 'interrupted' : 'completed'; task.lastActivityAt = now.toISOString(); activeCodexTasks.delete(task.id); persist(task.projectId); broadcastTaskStatus(task)
+  }
   const delta = typeof params.delta === 'string' ? params.delta : undefined
   const itemId = typeof params.itemId === 'string' ? params.itemId : typeof item?.id === 'string' ? item.id : undefined
   if (delta) appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text: delta, method: message.method, itemId }, sequence: 0, createdAt: new Date().toISOString() })
