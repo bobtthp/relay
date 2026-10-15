@@ -7,7 +7,18 @@ import { savedProjectPaths } from './local-project.js'
 
 
 const gitInfo = (projectPath: string) => {
-  const run = (args: string[]) => { try { return execFileSync('git', args, { cwd: projectPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return '' } }
+  const run = (args: string[]) => {
+    try {
+      return execFileSync('git', args, {
+        cwd: projectPath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2_000,
+        killSignal: 'SIGKILL',
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+      }).trim()
+    } catch { return '' }
+  }
   return { branch: run(['branch', '--show-current']) || 'detached', clean: run(['status', '--porcelain']) === '' }
 }
 

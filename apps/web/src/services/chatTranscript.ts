@@ -40,7 +40,7 @@ export function mergeSessionTimeline(history: Array<{ role: 'user' | 'assistant'
   return [...history.slice(0, firstHistoryMatch), ...events.slice(eventStart)]
 }
 
-export const isExecutionLog = (message: TranscriptMessage) => message.role === 'progress'
+export const isExecutionLog = (message: TranscriptMessage) => message.role === 'progress' || message.logType != null
 export const isFinalAssistantMessage = (method?: string) => method === 'item/agentMessage/delta'
 export const isStreamingDelta = (method?: string) => isFinalAssistantMessage(method) || method?.endsWith('/outputDelta') === true
 

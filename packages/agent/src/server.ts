@@ -6,6 +6,7 @@ import { execFile, spawn } from 'node:child_process'
 import os from 'node:os'
 import path, { resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 import { WebSocket, WebSocketServer } from 'ws'
 import { events, machines, projects, refreshProjects, tasks } from './local-state.js'
 import type { AgentName, PendingApproval, SessionEvent } from '../../protocol/src/types.js'
@@ -656,7 +657,8 @@ codex.onNotification(message => {
   if (delta) appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text: delta, method: message.method, itemId }, sequence: 0, createdAt: new Date().toISOString() })
 })
 
-app.use(express.static(resolve(process.cwd(), 'dist/web')))
+const webRoot = resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../dist/web')
+app.use(express.static(webRoot))
 app.get('/', (_request, response) => response.status(503).type('html').send(`<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Relay 页面暂不可用</title><body style="margin:0;background:#0d1118;color:#e9ebf0;font:16px system-ui,sans-serif;display:grid;min-height:100vh;place-items:center">
