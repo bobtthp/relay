@@ -15,6 +15,7 @@ import { loadProjectCache, saveProjectCache, type DeletedTask } from './project-
 import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionHistoryPage, readCodexSessionTokenUsage, refreshCodexSessionCache, stripInjectedPromptContext } from './codex-history.js'
 import { listDirectories, removeSavedProject, saveSelectedProject, validateProjectPath } from './local-project.js'
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
+import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 
 const app = express()
 const server = createServer(app)
@@ -53,7 +54,25 @@ let shuttingDown = false
 const eventSequences = new Map<string, number>()
 const hiddenCodexSessionIds = new Set<string>()
 const deletedTasks: DeletedTask[] = []
-const codex = new CodexAppServer()
+let providerSettings = readProviderSettings()
+const codex = new CodexAppServer(() => {
+  const deepseekKey = effectiveDeepSeekKey(providerSettings)
+  return { env: { ...process.env, ...proxyEnvironment(providerSettings), ...(deepseekKey ? { [DEEPSEEK_ENV_KEY]: deepseekKey } : {}) }, configOverrides: deepseekProviderOverrides }
+})
+// Codex reads provider keys from its environment at launch, so a changed key
+// needs a fresh app-server. Wait for active turns so none are cut off.
+let codexRestartPending = false
+const restartCodexWhenIdle = () => {
+  if (!codexRestartPending || activeCodexTasks.size > 0) return
+  codexRestartPending = false
+  codex.restart()
+}
+// Threads keep the provider they were started with, so switching between a
+// DeepSeek model and a ChatGPT model must name the provider on resume.
+const modelProviderForTask = (task: { model?: string; modelProvider?: string }) => isDeepSeekModel(task.model)
+  ? DEEPSEEK_PROVIDER_ID
+  : task.modelProvider === DEEPSEEK_PROVIDER_ID ? 'openai' : undefined
+const rememberModelProvider = (task: typeof tasks[number]) => { task.modelProvider = isDeepSeekModel(task.model) ? DEEPSEEK_PROVIDER_ID : undefined }
 let approvalSettings = readApprovalSettings()
 const automaticApprovalKinds = new Set<PendingApproval['kind']>(['command', 'file_change', 'permissions'])
 const pendingApprovalRequests = new Map<string, { taskId: string; itemId: string; rpcId: RpcId; kind: PendingApproval['kind']; requestedPermissions?: Record<string, unknown>; requestedSchema?: Record<string, unknown>; questions?: NonNullable<PendingApproval['questions']> }>()
@@ -126,7 +145,11 @@ const broadcast = (message: unknown) => {
   websocket.clients.forEach(client => { if (client.readyState === WebSocket.OPEN && authenticatedSockets.has(client)) client.send(encoded) })
 }
 
-const broadcastTaskStatus = (task: typeof tasks[number]) => broadcast({
+const broadcastTaskStatus = (task: typeof tasks[number]) => {
+  restartCodexWhenIdle()
+  broadcastTaskStatusMessage(task)
+}
+const broadcastTaskStatusMessage = (task: typeof tasks[number]) => broadcast({
   type: 'task_status',
   taskId: task.id,
   status: task.status,
@@ -356,7 +379,8 @@ const restoreThreadFromLocalTranscript = async (task: typeof tasks[number], proj
     if (text) selectedHistory.unshift({ role: message.role, text })
   }
   const items = selectedHistory.map(message => ({ type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.text }] }))
-  const restoredThreadId = await codex.startThread(projectPath)
+  const restoredThreadId = await codex.startThread(projectPath, modelProviderForTask({ model: task.model }))
+  rememberModelProvider(task)
   await codex.injectItems(restoredThreadId, items)
   task.remoteSessionAliases = [...new Set([...(task.remoteSessionAliases ?? []), previousThreadId])]
   assignRemoteSession(task, restoredThreadId)
@@ -380,7 +404,8 @@ const resumeOrRestoreThread = async (task: typeof tasks[number], projectPath: st
   const threadId = task.remoteSessionId
   if (!threadId) throw new Error('This task has no Codex session to resume')
   try {
-    await codex.resumeThread(threadId, projectPath)
+    await codex.resumeThread(threadId, projectPath, modelProviderForTask(task))
+    rememberModelProvider(task)
     await codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort)
   } catch (error) {
     if (!isThreadNotFound(error)) throw error
@@ -553,8 +578,8 @@ const answerApproval = (task: typeof tasks[number], approvalId: string, response
 
 const startCodexTask = (task: typeof tasks[number], prompt: string, projectPath: string) => {
   activeCodexTasks.add(task.id)
-  void codex.startThread(projectPath)
-    .then(threadId => { assignRemoteSession(task, threadId); persist(task.projectId); broadcast({ type: 'task_session_started', taskId: task.id, sessionId: threadId }); return codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort) })
+  void codex.startThread(projectPath, modelProviderForTask({ model: task.model }))
+    .then(threadId => { rememberModelProvider(task); assignRemoteSession(task, threadId); persist(task.projectId); broadcast({ type: 'task_session_started', taskId: task.id, sessionId: threadId }); return codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort) })
     .catch(error => failTask(task, error))
 }
 
@@ -692,6 +717,37 @@ app.put('/api/settings/approvals', (request, response) => {
   return response.json(approvalSettings)
 })
 
+app.get('/api/settings/providers', (_request, response) => response.json(providerSettingsStatus(providerSettings)))
+app.put('/api/settings/providers', (request, response) => {
+  const body = asRecord(request.body) ?? {}
+  if (!('deepseekApiKey' in body) && !('httpProxy' in body)) return response.status(400).json({ error: 'Provide deepseekApiKey or httpProxy' })
+  const next = { ...providerSettings }
+  if ('deepseekApiKey' in body) {
+    const key = body.deepseekApiKey
+    if (key !== null && typeof key !== 'string') return response.status(400).json({ error: 'deepseekApiKey must be a string or null' })
+    const trimmed = typeof key === 'string' ? key.trim() : ''
+    if (typeof key === 'string' && (!trimmed || trimmed.length > 512 || /\s/.test(trimmed))) return response.status(400).json({ error: 'Enter a valid DeepSeek API key' })
+    if (trimmed) next.deepseekApiKey = trimmed
+    else delete next.deepseekApiKey
+  }
+  if ('httpProxy' in body) {
+    const proxy = body.httpProxy
+    if (proxy !== null && typeof proxy !== 'string') return response.status(400).json({ error: 'httpProxy must be a string or null' })
+    const normalized = typeof proxy === 'string' && proxy.trim() ? normalizeProxyUrl(proxy) : undefined
+    if (typeof proxy === 'string' && proxy.trim() && !normalized) return response.status(400).json({ error: 'Enter a proxy URL such as http://127.0.0.1:7890' })
+    if (normalized) next.httpProxy = normalized
+    else delete next.httpProxy
+  }
+  providerSettings = next
+  writeProviderSettings(providerSettings)
+  // Codex reads the environment at launch, so it needs a fresh app-server.
+  codexRestartPending = true
+  restartCodexWhenIdle()
+  const status = providerSettingsStatus(providerSettings)
+  broadcast({ type: 'provider_settings', settings: status })
+  return response.json({ ...status, restartPending: codexRestartPending })
+})
+
 app.get('/api/environment', async (_request, response) => {
   const [codexState, claudeState, nodeState, gitState] = await Promise.all([
     commandVersion('codex'), commandVersion('claude'), commandVersion('node'), commandVersion('git'),
@@ -724,7 +780,8 @@ app.get('/api/account/rate-limits', async (_request, response) => {
 })
 
 app.get('/api/models', async (_request, response) => {
-  try { return response.json({ items: await codex.listModels() }) }
+  const extraModels = providerSettingsStatus(providerSettings).deepseek.configured ? deepseekModels : []
+  try { return response.json({ items: [...await codex.listModels(), ...extraModels] }) }
   catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to load Codex models' }) }
 })
 

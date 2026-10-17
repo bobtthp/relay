@@ -22,7 +22,10 @@ type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null
 const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && limit.resetsAt * 1_000 > Date.now()))
 type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
 const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
+const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
 const quotaForModel = (model: string | undefined, rateLimitsByLimitId: Record<string, RateLimits>, fallback: RateLimits | null) => {
+  // DeepSeek models are billed to the DeepSeek API key, not a ChatGPT quota pool.
+  if (isDeepSeekModel(model)) return null
   const limitId = quotaLimitIdForModel(model)
   // A depleted provider pool must not disable a different provider that still has quota.
   return rateLimitsByLimitId[limitId] ?? (limitId === 'base_model_inference' ? rateLimitsByLimitId.luna ?? null : fallback)
@@ -31,6 +34,8 @@ const isLunaModel = (model: string | Pick<CodexModel, 'model' | 'displayName'> |
   const value = typeof model === 'string' ? model : model ? `${model.model} ${model.displayName}` : ''
   return value.toLowerCase().includes('luna')
 }
+type DeepSeekStatus = { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
+type ProxyStatus = { url: string | null; systemProxy: string | null }
 type EnvironmentItem = { id?: 'codex' | 'claude'; label: string; installed: boolean; version?: string; status?: 'installing' | 'failed'; detail?: string }
 type CompletionSound = 'chime' | 'bell' | 'digital'
 const CODEX_MODEL_REFRESH_MS = 24 * 60 * 60 * 1_000
@@ -334,6 +339,12 @@ function App() {
   })
   const [autoApproveConfirmations, setAutoApproveConfirmations] = useState(false)
   const [autoAcceptDefaultMcpForms, setAutoAcceptDefaultMcpForms] = useState(false)
+  const [deepseekStatus, setDeepseekStatus] = useState<DeepSeekStatus>({ configured: false, source: null, keyHint: null })
+  const [deepseekKeyDraft, setDeepseekKeyDraft] = useState('')
+  const [deepseekSaving, setDeepseekSaving] = useState(false)
+  const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ url: null, systemProxy: null })
+  const [proxyDraft, setProxyDraft] = useState('')
+  const [modelsReloadKey, setModelsReloadKey] = useState(0)
   const completionSoundSettings = useRef({ enabled: completionSoundEnabled, quotaResetEnabled: quotaResetSoundEnabled, volume: completionSoundVolume, sound: completionSound })
   completionSoundSettings.current = { enabled: completionSoundEnabled, quotaResetEnabled: quotaResetSoundEnabled, volume: completionSoundVolume, sound: completionSound }
   const [localProject, setLocalProject] = useState<{ id: string; name: string; path: string; branch: string; clean: boolean } | null>(null)
@@ -611,6 +622,12 @@ function App() {
       setAutoApproveConfirmations(settings.autoApproveConfirmations === true)
       setAutoAcceptDefaultMcpForms(settings.autoAcceptDefaultMcpForms === true)
     }).catch(() => undefined)
+    void authenticatedFetch('/api/settings/providers').then(async response => {
+      if (!response.ok) return
+      const settings = await response.json() as { deepseek?: DeepSeekStatus; proxy?: ProxyStatus }
+      if (settings.deepseek) setDeepseekStatus(settings.deepseek)
+      if (settings.proxy) setProxyStatus(settings.proxy)
+    }).catch(() => undefined)
   }, [])
   useEffect(() => { if (selectedModel) localStorage.setItem('relay-codex-model', selectedModel) }, [selectedModel])
   useEffect(() => { if (selectedEffort) localStorage.setItem('relay-codex-effort', selectedEffort) }, [selectedEffort])
@@ -662,7 +679,7 @@ function App() {
       window.clearInterval(timer)
       window.removeEventListener('focus', refreshIfStale)
     }
-  }, [])
+  }, [modelsReloadKey])
   useEffect(() => {
     const runningTasks = tasks.filter(task => task.state === 'running').length
     document.title = runningTasks ? `Relay (${runningTasks}) — Remote Coding Agents` : 'Relay — Remote Coding Agents'
@@ -773,7 +790,7 @@ function App() {
         tokenUsage?: Task['tokenUsage']
         approval?: NonNullable<Task['pendingApprovals']>[number]
         approvalId?: string
-        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean }
+        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; proxy?: ProxyStatus }
         event?: {
           id: string
           taskId: string
@@ -795,6 +812,11 @@ function App() {
         if (message.type === 'approval_settings' && message.settings) {
           setAutoApproveConfirmations(message.settings.autoApproveConfirmations === true)
           setAutoAcceptDefaultMcpForms(message.settings.autoAcceptDefaultMcpForms === true)
+        }
+        if (message.type === 'provider_settings' && message.settings?.deepseek) {
+          setDeepseekStatus(message.settings.deepseek)
+          if (message.settings.proxy) setProxyStatus(message.settings.proxy)
+          setModelsReloadKey(current => current + 1)
         }
         if (message.type === 'task_deleted' && message.taskId) {
           setActiveTask(0)
@@ -1033,6 +1055,31 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
   }
 
+  const saveProviderSettings = (change: { deepseekApiKey?: string | null; httpProxy?: string | null }, savedMessage: string) => {
+    setDeepseekSaving(true)
+    void authenticatedFetch('/api/settings/providers', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(change),
+    }).then(async response => {
+      const result = await response.json() as { deepseek?: DeepSeekStatus; proxy?: ProxyStatus; restartPending?: boolean; error?: string }
+      if (!response.ok || !result.deepseek) throw new Error(result.error ?? 'Unable to save settings')
+      setDeepseekStatus(result.deepseek)
+      if (result.proxy) setProxyStatus(result.proxy)
+      if ('deepseekApiKey' in change) setDeepseekKeyDraft('')
+      if ('httpProxy' in change) setProxyDraft('')
+      setModelsReloadKey(current => current + 1)
+      notify(result.restartPending ? (language === 'zh' ? '已保存；Codex 会在当前任务结束后应用' : 'Saved. Codex applies it after running tasks finish') : savedMessage)
+    }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save settings'))
+      .finally(() => setDeepseekSaving(false))
+  }
+  const saveDeepseekKey = (apiKey: string | null) => saveProviderSettings({ deepseekApiKey: apiKey }, apiKey
+    ? (language === 'zh' ? 'DeepSeek API Key 已保存' : 'DeepSeek API key saved')
+    : (language === 'zh' ? 'DeepSeek API Key 已清除' : 'DeepSeek API key removed'))
+  const saveHttpProxy = (proxy: string | null) => saveProviderSettings({ httpProxy: proxy }, proxy
+    ? (language === 'zh' ? '代理已保存' : 'Proxy saved')
+    : (language === 'zh' ? '代理已清除' : 'Proxy removed'))
+
   const openProjectPicker = () => {
     setProjectPickerOpen(true)
     browseDirectory()
@@ -1134,7 +1181,7 @@ function App() {
       <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span></div>
       <div className="topbar-center"><span className="connection-dot" /> {machineName} <ChevronDown size={14} /></div>
       {rateLimit && <RateLimitStatus rateLimit={rateLimit} language={language} />}
-      <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu" ref={settingsMenuRef}><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoAcceptDefaultMcpForms} onChange={event => setAutoAcceptDefaultForms(event.target.checked)} /><span>{text.autoAcceptDefaultForms}</span></label><p className="auto-approval-help">{text.autoAcceptDefaultFormsHelp}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-toggle"><input type="checkbox" checked={quotaResetSoundEnabled} onChange={event => setQuotaResetSoundEnabled(event.target.checked)} /><span>{text.quotaResetSoundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled && !quotaResetSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled && !quotaResetSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={() => playCompletionTone()} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
+      <div className="topbar-actions"><button className="icon-btn sidebar-toggle" onClick={() => setSidebarOpen(current => !current)} aria-label={sidebarOpen ? 'Collapse workspace sidebar' : 'Expand workspace sidebar'} title={sidebarOpen ? 'Collapse workspace' : 'Expand workspace'}><Menu size={18} /></button><div className="settings-menu" ref={settingsMenuRef}><button className="icon-btn" onClick={() => setSettingsOpen(current => !current)} aria-label="Display settings" aria-expanded={settingsOpen}><Settings size={18} /></button>{settingsOpen && <div className="settings-popover"><span className="eyebrow">{text.readingSize}</span><div className="size-options">{(['small', 'medium', 'large'] as const).map(size => <button key={size} className={readingSize === size ? 'active' : ''} onClick={() => setReadingSize(size)}>{sizeLabel(size)}</button>)}</div><span className="eyebrow settings-approval-label">{language === 'zh' ? '审批' : 'APPROVALS'}</span><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoApproveConfirmations} onChange={event => setAutoApproval(event.target.checked)} /><span>{text.autoApproval}</span></label><p className="auto-approval-help">{text.autoApprovalHelp}</p><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={autoAcceptDefaultMcpForms} onChange={event => setAutoAcceptDefaultForms(event.target.checked)} /><span>{text.autoAcceptDefaultForms}</span></label><p className="auto-approval-help">{text.autoAcceptDefaultFormsHelp}</p><span className="eyebrow settings-provider-label">DEEPSEEK</span><p className="provider-status">{deepseekStatus.configured ? (deepseekStatus.source === 'environment' ? (language === 'zh' ? `使用环境变量 ${deepseekStatus.keyHint}` : `Using environment key ${deepseekStatus.keyHint}`) : (language === 'zh' ? `已设置 ${deepseekStatus.keyHint}` : `Key set ${deepseekStatus.keyHint}`)) : (language === 'zh' ? '未设置 API Key' : 'No API key set')}</p><form className="provider-key-form" onSubmit={event => { event.preventDefault(); if (deepseekKeyDraft.trim()) saveDeepseekKey(deepseekKeyDraft.trim()) }}><input type="password" autoComplete="off" spellCheck={false} placeholder="sk-…" aria-label="DeepSeek API key" value={deepseekKeyDraft} onChange={event => setDeepseekKeyDraft(event.target.value)} /><button className="secondary-btn" type="submit" disabled={deepseekSaving || !deepseekKeyDraft.trim()}>{language === 'zh' ? '保存' : 'Save'}</button></form>{deepseekStatus.source === 'relay' && <button className="secondary-btn provider-key-clear" disabled={deepseekSaving} onClick={() => saveDeepseekKey(null)}>{language === 'zh' ? '清除 Key' : 'Remove key'}</button>}<p className="auto-approval-help provider-help">{language === 'zh' ? '仅保存在本机 ~/.relay-web，设置后可在模型列表中选择 DeepSeek。' : 'Stored only on this Mac in ~/.relay-web. DeepSeek models then appear in the model list.'}</p><span className="eyebrow settings-provider-label">{language === 'zh' ? '网络代理' : 'HTTP PROXY'}</span><p className="provider-status">{proxyStatus.url ? (language === 'zh' ? `已使用 ${proxyStatus.url}` : `Using ${proxyStatus.url}`) : (language === 'zh' ? '未设置代理' : 'No proxy')}</p><form className="provider-key-form" onSubmit={event => { event.preventDefault(); if (proxyDraft.trim()) saveHttpProxy(proxyDraft.trim()) }}><input type="text" autoComplete="off" spellCheck={false} placeholder="http://127.0.0.1:7890" aria-label="HTTP proxy" value={proxyDraft} onChange={event => setProxyDraft(event.target.value)} /><button className="secondary-btn" type="submit" disabled={deepseekSaving || !proxyDraft.trim()}>{language === 'zh' ? '保存' : 'Save'}</button></form>{proxyStatus.systemProxy && proxyStatus.systemProxy !== proxyStatus.url && <button className="secondary-btn provider-key-clear" disabled={deepseekSaving} onClick={() => saveHttpProxy(proxyStatus.systemProxy)}>{language === 'zh' ? `使用系统代理 ${proxyStatus.systemProxy}` : `Use system proxy ${proxyStatus.systemProxy}`}</button>}{proxyStatus.url && <button className="secondary-btn provider-key-clear" disabled={deepseekSaving} onClick={() => saveHttpProxy(null)}>{language === 'zh' ? '清除代理' : 'Remove proxy'}</button>}<p className="auto-approval-help provider-help">{language === 'zh' ? 'Relay 作为后台服务运行，不会继承终端里的代理变量；Codex 的请求会走这里设置的代理。' : 'Relay runs as a background service and does not inherit your shell proxy. Codex traffic uses this proxy.'}</p><span className="eyebrow settings-sound-label">{text.completionSound}</span><label className="sound-toggle"><input type="checkbox" checked={completionSoundEnabled} onChange={event => setCompletionSoundEnabled(event.target.checked)} /><span>{text.soundEnabled}</span></label><label className="sound-toggle"><input type="checkbox" checked={quotaResetSoundEnabled} onChange={event => setQuotaResetSoundEnabled(event.target.checked)} /><span>{text.quotaResetSoundEnabled}</span></label><label className="sound-style"><span>{text.soundStyle}</span><select value={completionSound} onChange={event => setCompletionSound(event.target.value as CompletionSound)} disabled={!completionSoundEnabled && !quotaResetSoundEnabled}><option value="chime">{text.chimeSound}</option><option value="bell">{text.bellSound}</option><option value="digital">{text.digitalSound}</option></select></label><label className="sound-volume"><span>{text.volume}<output>{completionSoundVolume}%</output></span><input type="range" min="0" max="100" step="5" value={completionSoundVolume} onChange={event => setCompletionSoundVolume(Number(event.target.value))} disabled={!completionSoundEnabled && !quotaResetSoundEnabled} /></label><button className="secondary-btn sound-preview" onClick={() => playCompletionTone()} disabled={!completionSoundEnabled}>{text.previewSound}</button><span className="eyebrow settings-language-label">{text.language}</span><div className="language-options"><button className={language === 'zh' ? 'active' : ''} onClick={() => setLanguage('zh')}>中文</button><button className={language === 'en' ? 'active' : ''} onClick={() => setLanguage('en')}>English</button></div></div>}</div><div className="avatar">KC</div></div>
     </header>
 
     <div className="workspace">

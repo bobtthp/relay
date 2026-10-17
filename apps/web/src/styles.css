@@ -83,6 +83,13 @@
 .auto-approval-toggle { align-items:flex-start; line-height:1.4; }
 .auto-approval-toggle input { margin-top:2px; accent-color:#8d79ed; }
 .auto-approval-help { margin:6px 0 0 22px; color:#7d8999; font-size:10px; line-height:1.45; }
+.settings-provider-label { display:block; margin-top:14px; }
+.provider-status { margin:7px 0 0; color:#c0c6d0; font-size:11px; }
+.provider-key-form { display:flex; gap:5px; margin-top:7px; }
+.provider-key-form input { flex:1; min-width:0; border:1px solid #29313d; border-radius:4px; background:#10151c; color:#c8cfda; padding:6px 7px; font-size:10px; }
+.provider-key-form button, .provider-key-clear { padding:5px 8px; font-size:10px; }
+.provider-key-clear { margin-top:6px; }
+.provider-help { margin-left:0; }
 .sound-toggle { display:flex; align-items:center; gap:7px; margin-top:8px; color:#c0c6d0; font-size:11px; }
 .sound-toggle input { accent-color:#8d79ed; }
 .sound-style { display:grid; gap:5px; margin-top:10px; color:#929cac; font-size:10px; }
