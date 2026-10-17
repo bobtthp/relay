@@ -17,6 +17,8 @@ import { loadProjectCache, saveProjectCache, type DeletedTask } from './project-
 import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionHistoryPage, readCodexSessionTokenUsage, refreshCodexSessionCache, stripInjectedPromptContext } from './codex-history.js'
 import { listDirectories, removeSavedProject, saveSelectedProject, validateProjectPath } from './local-project.js'
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
+import { buildHandoff, checkpointDirectory, checkpointRule } from './handoff.js'
+import { MemoryConflictError, MemoryWatcher, applyConsolidation, consolidationInstructions, consolidationPrompt, discardConsolidation, memoryStats, parseConsolidationPlan, readConsolidation, storeConsolidationProposal, claudeMemoryPromptAppend, codexMemoryInstructions, deleteMemoryEntry, estimateTokens, memoryPrimer, importClaudeMemories, listMemoryEntries, memoryDirectory, previewClaudeImport, readMemoryAudit, readMemoryIndex, readMemorySettings, rollbackClaudeImport, setMemoryEnabled, touchesMemory, writeMemoryEntry } from './project-memory.js'
 import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 
 const app = express()
@@ -76,6 +78,74 @@ const modelProviderForTask = (task: { model?: string; modelProvider?: string }) 
   ? DEEPSEEK_PROVIDER_ID
   : task.modelProvider === DEEPSEEK_PROVIDER_ID ? 'openai' : undefined
 const rememberModelProvider = (task: typeof tasks[number]) => { task.modelProvider = isDeepSeekModel(task.model) ? DEEPSEEK_PROVIDER_ID : undefined }
+// Shared memory is applied on thread/start and thread/resume alike, so a
+// resumed thread sees the same memory as a new one.
+const addMemoryTokens = (task: typeof tasks[number], kind: 'injected' | 'tools', text: string) => {
+  const tokens = estimateTokens(text)
+  if (!tokens) return
+  const current = task.memoryTokens ?? { injected: 0, tools: 0 }
+  task.memoryTokens = { ...current, [kind]: current[kind] + tokens }
+}
+// developerInstructions only take effect on thread/start (thread/resume ignores
+// them for an existing thread), so only a new thread is counted and marked.
+/** Directories outside the project that Relay lets agents write: shared memory and task checkpoints. */
+const relayWritableRoots = (projectPath: string) => [
+  ...(readMemorySettings(projectPath).enabled ? [memoryDirectory(projectPath)] : []),
+  ...(providerSettings.checkpointsEnabled ? [checkpointDirectory(projectPath)] : []),
+]
+const codexThreadOptions = (task: { model?: string; modelProvider?: string }, projectPath: string, newThreadFor?: typeof tasks[number]) => {
+  const developerInstructions = readMemorySettings(projectPath).enabled ? codexMemoryInstructions(projectPath) : undefined
+  if (developerInstructions && newThreadFor) {
+    addMemoryTokens(newThreadFor, 'injected', developerInstructions)
+    newThreadFor.memorySession = memoryDirectory(projectPath)
+  }
+  const writableRoots = relayWritableRoots(projectPath)
+  return { modelProvider: modelProviderForTask(task), ...(developerInstructions ? { developerInstructions } : {}), ...(writableRoots.length ? { writableRoots } : {}) }
+}
+/**
+ * thread/resume ignores writable_roots for an existing thread, so a thread that
+ * predates shared memory would need an approval for every memory write. Extend
+ * its own workspace-write policy with the memory directory; other modes are
+ * left alone (full access can already write, read-only stays read-only).
+ */
+const memorySandboxPolicy = (resumed: Record<string, unknown>, projectPath: string) => {
+  const wanted = relayWritableRoots(projectPath)
+  const sandbox = asRecord(resumed.sandbox)
+  if (!wanted.length || sandbox?.type !== 'workspaceWrite') return undefined
+  const roots = Array.isArray(sandbox.writableRoots) ? sandbox.writableRoots.filter((root): root is string => typeof root === 'string') : []
+  const missing = wanted.filter(directory => !roots.includes(directory))
+  return missing.length ? { ...sandbox, writableRoots: [...roots, ...missing] } : undefined
+}
+/**
+ * Builds what the agent receives for a new turn: the handoff after an agent
+ * switch (facts Relay recorded since that agent last worked on the task) and
+ * the checkpoint rule once per agent session. Both are stripped from history.
+ */
+const prepareAgentPrompt = (task: typeof tasks[number], projectPath: string, message: string, currentEventId?: string) => {
+  let prefix = ''
+  if (task.handoffPending) {
+    const since = task.handoffPending.sinceSequence
+    const taskEvents = events.filter(event => event.taskId === task.id && event.sequence > since && event.id !== currentEventId).sort((a, b) => a.sequence - b.sequence)
+    prefix += buildHandoff({ from: task.handoffPending.from, to: task.agent, projectPath, taskId: task.id, events: taskEvents })
+    task.handoffPending = undefined
+  }
+  if (providerSettings.checkpointsEnabled && !task.checkpointSession) {
+    prefix += checkpointRule(projectPath, task.id)
+    task.checkpointSession = true
+  }
+  if (prefix) task.handoffTokens = (task.handoffTokens ?? 0) + estimateTokens(prefix)
+  return prefix + message
+}
+
+/** Prepends the one-time memory note when this task's session predates shared memory. */
+const withMemoryPrimer = (task: typeof tasks[number], projectPath: string, prompt: string) => {
+  if (!readMemorySettings(projectPath).enabled || task.memorySession === memoryDirectory(projectPath)) return prompt
+  const primer = memoryPrimer(task.agent, projectPath)
+  addMemoryTokens(task, 'injected', primer)
+  task.memorySession = memoryDirectory(projectPath)
+  return primer + prompt
+}
+const projectPathOf = (task: typeof tasks[number]) => projects.find(project => project.id === task.projectId)?.path
 let approvalSettings = readApprovalSettings()
 const automaticApprovalKinds = new Set<PendingApproval['kind']>(['command', 'file_change', 'permissions'])
 type PendingApprovalRequest = {
@@ -105,12 +175,24 @@ const commandVersion = async (command: string) => {
     return { installed: true, version: stdout.trim().split('\n')[0] || 'Installed' }
   } catch { return { installed: false } }
 }
+// Agents write memory files directly; the watcher attributes each change to the
+// agent running in that project and keeps MEMORY.md in sync.
+const memoryWatcher = new MemoryWatcher(projectPath => {
+  const project = projects.find(item => item.path === projectPath)
+  const agents = new Set<'Claude' | 'Codex'>()
+  for (const task of tasks) if (project && task.projectId === project.id && activeCodexTasks.has(task.id)) agents.add(task.agent)
+  return agents
+}, projectPath => {
+  const project = projects.find(item => item.path === projectPath)
+  if (project) broadcast({ type: 'memory_changed', projectId: project.id })
+})
 const loadedProjectIds = new Set<string>()
 const loadedTaskIds = new Set(tasks.map(task => task.id))
 const loadedEventIds = new Set(events.map(event => event.id))
 const hydrateProjectCache = (project: typeof projects[number]) => {
   if (loadedProjectIds.has(project.id)) return
   loadedProjectIds.add(project.id)
+  if (readMemorySettings(project.path).enabled) memoryWatcher.watch(project.path)
   const cached = loadProjectCache(project.path)
   if (!cached) return
   for (const deleted of cached.deletedTasks ?? []) {
@@ -233,7 +315,9 @@ const appendEvent = (event: SessionEvent) => {
   event.sequence = (eventSequences.get(event.taskId) ?? 0) + 1
   eventSequences.set(event.taskId, event.sequence)
   events.push(event)
-  scheduleEventPersist(tasks.find(task => task.id === event.taskId)?.projectId)
+  const task = tasks.find(item => item.id === event.taskId)
+  if (task && event.type !== 'user_message' && event.payload.agent === undefined) event.payload.agent = task.agent
+  scheduleEventPersist(task?.projectId)
   broadcast({ type: 'session_event', event })
 }
 
@@ -398,7 +482,7 @@ const restoreThreadFromLocalTranscript = async (task: typeof tasks[number], proj
     if (text) selectedHistory.unshift({ role: message.role, text })
   }
   const items = selectedHistory.map(message => ({ type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.text }] }))
-  const restoredThreadId = await codex.startThread(projectPath, modelProviderForTask({ model: task.model }))
+  const restoredThreadId = await codex.startThread(projectPath, codexThreadOptions({ model: task.model }, projectPath, task))
   rememberModelProvider(task)
   await codex.injectItems(restoredThreadId, items)
   task.remoteSessionAliases = [...new Set([...(task.remoteSessionAliases ?? []), previousThreadId])]
@@ -423,9 +507,9 @@ const resumeOrRestoreThread = async (task: typeof tasks[number], projectPath: st
   const threadId = task.remoteSessionId
   if (!threadId) throw new Error('This task has no Codex session to resume')
   try {
-    await codex.resumeThread(threadId, projectPath, modelProviderForTask(task))
+    const resumed = await codex.resumeThread(threadId, projectPath, codexThreadOptions(task, projectPath))
     rememberModelProvider(task)
-    await codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort)
+    await codex.startTurn(threadId, withMemoryPrimer(task, projectPath, prompt), projectPath, task.model, task.reasoningEffort, memorySandboxPolicy(resumed, projectPath))
   } catch (error) {
     if (!isThreadNotFound(error)) throw error
     const restoredThreadId = await restoreThreadFromLocalTranscript(task, projectPath)
@@ -674,7 +758,14 @@ const describeClaudeTool = (toolName: string, input: Record<string, unknown>, co
 const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath: string) => {
   activeCodexTasks.add(task.id)
   const tools = new Map<string, { name: string; input: Record<string, unknown> }>()
-  claude.start(task.id, prompt, { cwd: projectPath, resume: task.remoteSessionId, model: task.model, effort: task.reasoningEffort }, {
+  const memory = readMemorySettings(projectPath).enabled ? { directory: memoryDirectory(projectPath), promptAppend: claudeMemoryPromptAppend } : undefined
+  const writableDirectories = providerSettings.checkpointsEnabled ? [checkpointDirectory(projectPath)] : []
+  if (memory && !task.remoteSessionId) {
+    addMemoryTokens(task, 'injected', `${claudeMemoryPromptAppend}\n${readMemoryIndex(projectPath)}`)
+    task.memorySession = memory.directory
+  }
+  const turnPrompt = task.remoteSessionId ? withMemoryPrimer(task, projectPath, prompt) : prompt
+  claude.start(task.id, turnPrompt, { cwd: projectPath, resume: task.remoteSessionId, model: task.model, effort: task.reasoningEffort, memory, writableDirectories }, {
     onSessionId: sessionId => {
       if (task.remoteSessionId === sessionId) return
       assignRemoteSession(task, sessionId)
@@ -691,6 +782,7 @@ const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath
       const tool = tools.get(toolUseId)
       if (!tool) return
       tools.delete(toolUseId)
+      if (memory && (touchesMemory(projectPath, tool.input.file_path) || touchesMemory(projectPath, tool.input.command))) addMemoryTokens(task, 'tools', `${JSON.stringify(tool.input)}\n${output}`)
       const described = describeClaudeTool(tool.name, tool.input, true)
       const isTest = tool.name === 'Bash' && /\b(test|vitest|jest|pytest|playwright|cypress|cargo test|go test)\b/i.test(String(tool.input.command ?? ''))
       const logType = isError ? 'error' : isTest ? 'test' : described.logType
@@ -735,7 +827,7 @@ const startAgentTask = (task: typeof tasks[number], prompt: string, projectPath:
 
 const startCodexTask = (task: typeof tasks[number], prompt: string, projectPath: string) => {
   activeCodexTasks.add(task.id)
-  void codex.startThread(projectPath, modelProviderForTask({ model: task.model }))
+  void codex.startThread(projectPath, codexThreadOptions({ model: task.model }, projectPath, task))
     .then(threadId => { rememberModelProvider(task); assignRemoteSession(task, threadId); persist(task.projectId); broadcast({ type: 'task_session_started', taskId: task.id, sessionId: threadId }); return codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort) })
     .catch(error => failTask(task, error))
 }
@@ -767,6 +859,13 @@ codex.onNotification(message => {
     }
   }
   const item = asRecord(params.item)
+  if (message.method === 'item/completed' && item) {
+    const projectPath = projectPathOf(task)
+    if (projectPath && readMemorySettings(projectPath).enabled) {
+      if (item.type === 'commandExecution' && touchesMemory(projectPath, item.command)) addMemoryTokens(task, 'tools', `${String(item.command)}\n${typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput : ''}`)
+      if (item.type === 'fileChange') for (const change of normalizeFileChanges(item.changes) ?? []) if (touchesMemory(projectPath, change.path)) addMemoryTokens(task, 'tools', change.diff)
+    }
+  }
   if ((message.method === 'item/started' || message.method === 'item/completed') && item) {
     const completed = message.method === 'item/completed'
     const progress = formatCodexProgress(item, completed)
@@ -877,7 +976,8 @@ app.put('/api/settings/approvals', (request, response) => {
 app.get('/api/settings/providers', (_request, response) => response.json(providerSettingsStatus(providerSettings)))
 app.put('/api/settings/providers', (request, response) => {
   const body = asRecord(request.body) ?? {}
-  if (!('deepseekApiKey' in body) && !('httpProxy' in body)) return response.status(400).json({ error: 'Provide deepseekApiKey or httpProxy' })
+  if (!('deepseekApiKey' in body) && !('httpProxy' in body) && !('checkpointsEnabled' in body)) return response.status(400).json({ error: 'Provide deepseekApiKey, httpProxy or checkpointsEnabled' })
+  if ('checkpointsEnabled' in body && typeof body.checkpointsEnabled !== 'boolean') return response.status(400).json({ error: 'checkpointsEnabled must be a boolean' })
   const next = { ...providerSettings }
   if ('deepseekApiKey' in body) {
     const key = body.deepseekApiKey
@@ -894,6 +994,10 @@ app.put('/api/settings/providers', (request, response) => {
     if (typeof proxy === 'string' && proxy.trim() && !normalized) return response.status(400).json({ error: 'Enter a proxy URL such as http://127.0.0.1:7890' })
     if (normalized) next.httpProxy = normalized
     else delete next.httpProxy
+  }
+  if (typeof body.checkpointsEnabled === 'boolean') {
+    if (body.checkpointsEnabled) next.checkpointsEnabled = true
+    else delete next.checkpointsEnabled
   }
   providerSettings = next
   writeProviderSettings(providerSettings)
@@ -1009,6 +1113,158 @@ app.delete('/api/projects/:projectId', (request, response) => {
   } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : 'Unable to remove workspace' }) }
 })
 
+const memoryProject = (projectId: string, response: express.Response) => {
+  const project = projects.find(item => item.id === projectId)
+  if (!project) { response.status(404).json({ error: 'Project not found' }); return undefined }
+  return project
+}
+const memoryState = (projectPath: string) => {
+  const settings = readMemorySettings(projectPath)
+  const preview = settings.claudeImport ? undefined : previewClaudeImport(projectPath)
+  return {
+    enabled: settings.enabled,
+    directory: memoryDirectory(projectPath),
+    entries: listMemoryEntries(projectPath),
+    stats: memoryStats(projectPath),
+    consolidation: { ...readConsolidation(projectPath), running: consolidatingProjects.has(projectPath) },
+    claudeImport: settings.claudeImport
+      ? { imported: true, at: settings.claudeImport.at, files: settings.claudeImport.files }
+      : { imported: false, sourceDirectory: preview?.sourceDirectory ?? null, files: preview?.files ?? [] },
+  }
+}
+const consolidatingProjects = new Set<string>()
+const memoryError = (response: express.Response, error: unknown) => response.status(error instanceof MemoryConflictError ? 409 : 400).json({ error: error instanceof Error ? error.message : 'Memory request failed' })
+const afterMemoryWrite = (project: typeof projects[number]) => {
+  memoryWatcher.resync(project.path)
+  broadcast({ type: 'memory_changed', projectId: project.id })
+}
+
+app.get('/api/projects/:projectId/memory', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (project) return response.json(memoryState(project.path))
+})
+app.get('/api/projects/:projectId/memory/usage', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  const items = tasks.filter(task => task.projectId === project.id && task.memoryTokens).map(task => {
+    const taskTotal = task.agent === 'Claude' ? task.tokenUsage?.totalTokens : task.remoteSessionId ? readCodexSessionTokenUsage(task.remoteSessionId)?.totalTokens : undefined
+    return { id: task.id, title: stripInjectedPromptContext(task.title), agent: task.agent, injected: task.memoryTokens!.injected, tools: task.memoryTokens!.tools, taskTotal: taskTotal ?? null }
+  }).sort((a, b) => (b.injected + b.tools) - (a.injected + a.tools))
+  const injected = items.reduce((sum, item) => sum + item.injected, 0)
+  const toolTokens = items.reduce((sum, item) => sum + item.tools, 0)
+  const measured = items.filter(item => item.taskTotal)
+  const taskTotal = measured.reduce((sum, item) => sum + (item.taskTotal ?? 0), 0)
+  const measuredMemory = measured.reduce((sum, item) => sum + item.injected + item.tools, 0)
+  const consolidation = readConsolidation(project.path)
+  // Applied or discarded proposals move into history, so pending is never counted twice.
+  const consolidationTokens = [...consolidation.history, ...(consolidation.pending ? [consolidation.pending] : [])].reduce((sum, item) => sum + item.tokens, 0)
+  return response.json({ estimated: true, injected, tools: toolTokens, consolidation: consolidationTokens, total: injected + toolTokens + consolidationTokens, taskTotal, share: taskTotal ? measuredMemory / taskTotal : null, items: items.slice(0, 20) })
+})
+app.put('/api/projects/:projectId/memory/settings', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  if (typeof request.body?.enabled !== 'boolean') return response.status(400).json({ error: 'enabled must be a boolean' })
+  setMemoryEnabled(project.path, request.body.enabled)
+  if (request.body.enabled) memoryWatcher.watch(project.path)
+  else memoryWatcher.unwatch(project.path)
+  afterMemoryWrite(project)
+  return response.json(memoryState(project.path))
+})
+app.get('/api/projects/:projectId/memory/audit', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (project) return response.json({ items: readMemoryAudit(project.path, Math.min(500, Number(request.query.limit) || 100)) })
+})
+app.put('/api/projects/:projectId/memory/entries/:file', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  const body = asRecord(request.body) ?? {}
+  if (typeof body.name !== 'string' || !body.name.trim() || typeof body.body !== 'string') return response.status(400).json({ error: 'name and body are required' })
+  try {
+    const entry = writeMemoryEntry(project.path, request.params.file, { name: body.name, description: typeof body.description === 'string' ? body.description : '', type: typeof body.type === 'string' ? body.type : undefined, body: body.body }, typeof body.revision === 'string' ? body.revision : undefined)
+    afterMemoryWrite(project)
+    return response.json(entry)
+  } catch (error) { return memoryError(response, error) }
+})
+app.delete('/api/projects/:projectId/memory/entries/:file', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  try {
+    deleteMemoryEntry(project.path, request.params.file, typeof request.query.revision === 'string' ? request.query.revision : '')
+    afterMemoryWrite(project)
+    return response.status(204).end()
+  } catch (error) { return memoryError(response, error) }
+})
+// One tool-less call over every entry; the user reviews the proposal before it changes anything.
+app.post('/api/projects/:projectId/memory/consolidate', async (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  const agent: AgentName = request.body?.agent === 'Codex' ? 'Codex' : 'Claude'
+  if (consolidatingProjects.has(project.path)) return response.status(409).json({ error: 'A consolidation is already running for this project' })
+  const entries = listMemoryEntries(project.path)
+  if (entries.length < 2) return response.status(400).json({ error: 'There is nothing to consolidate yet' })
+  consolidatingProjects.add(project.path)
+  broadcast({ type: 'memory_changed', projectId: project.id })
+  try {
+    const prompt = consolidationPrompt(entries)
+    let result: { text: string; usage?: { totalTokens: number } }
+    let model: string | undefined
+    if (agent === 'Claude') {
+      await claude.ensureReady()
+      model = 'sonnet'
+      result = await claude.runOneShot(prompt, { model, systemPrompt: consolidationInstructions })
+    } else {
+      result = await codex.runOneShot(project.path, prompt, { developerInstructions: consolidationInstructions })
+    }
+    const plan = parseConsolidationPlan(result.text, entries)
+    if (readConsolidation(project.path).pending) discardConsolidation(project.path)
+    const proposal = storeConsolidationProposal(project.path, { agent, ...(model ? { model } : {}), tokens: result.usage?.totalTokens ?? estimateTokens(prompt + result.text), tokensMeasured: Boolean(result.usage), ...plan })
+    return response.json({ proposal, state: memoryState(project.path) })
+  } catch (error) {
+    if (error instanceof ClaudeUnavailableError) return claudeUnavailableResponse(response, error)
+    return response.status(502).json({ error: error instanceof Error ? error.message : 'Consolidation failed' })
+  } finally {
+    consolidatingProjects.delete(project.path)
+    broadcast({ type: 'memory_changed', projectId: project.id })
+  }
+})
+app.post('/api/projects/:projectId/memory/consolidate/apply', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  try {
+    const result = applyConsolidation(project.path)
+    afterMemoryWrite(project)
+    return response.json({ ...result, state: memoryState(project.path) })
+  } catch (error) { return memoryError(response, error) }
+})
+app.delete('/api/projects/:projectId/memory/consolidate', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  discardConsolidation(project.path)
+  afterMemoryWrite(project)
+  return response.json(memoryState(project.path))
+})
+
+app.post('/api/projects/:projectId/memory/import-claude', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  const files = Array.isArray(request.body?.files) ? request.body.files.filter((file: unknown): file is string => typeof file === 'string') : []
+  if (!files.length) return response.status(400).json({ error: 'Choose at least one memory to import' })
+  try {
+    const imported = importClaudeMemories(project.path, files)
+    afterMemoryWrite(project)
+    return response.json({ imported, state: memoryState(project.path) })
+  } catch (error) { return memoryError(response, error) }
+})
+app.post('/api/projects/:projectId/memory/import-claude/rollback', (request, response) => {
+  const project = memoryProject(request.params.projectId, response)
+  if (!project) return
+  try {
+    const result = rollbackClaudeImport(project.path)
+    afterMemoryWrite(project)
+    return response.json({ ...result, state: memoryState(project.path) })
+  } catch (error) { return memoryError(response, error) }
+})
+
 app.get('/api/projects/:projectId/task-status', (request, response) => {
   const project = projects.find(item => item.id === request.params.projectId)
   if (!project) return response.status(404).json({ error: 'Project not found' })
@@ -1078,7 +1334,7 @@ app.post('/api/projects/:projectId/deleted-tasks/:sessionId/restore', async (req
     return response.json(publicTask)
   }
   try {
-    await codex.resumeThread(sessionId, project.path)
+    await codex.resumeThread(sessionId, project.path, codexThreadOptions({}, project.path))
   } catch (error) {
     return response.status(503).json({ error: error instanceof Error ? `Codex 无法恢复此会话：${error.message}` : 'Codex 无法恢复此会话' })
   }
@@ -1224,6 +1480,42 @@ const claudeUnavailableResponse = (response: express.Response, error: unknown) =
   ? response.status(409).json({ error: error.message, code: error.code })
   : response.status(503).json({ error: error instanceof Error ? error.message : 'Claude is unavailable' })
 
+app.patch('/api/tasks/:taskId/agent', async (request, response) => {
+  const task = tasks.find(item => item.id === request.params.taskId)
+  if (!task) return response.status(404).json({ error: 'Task not found' })
+  const agent: AgentName | undefined = request.body?.agent === 'Codex' || request.body?.agent === 'Claude' ? request.body.agent : undefined
+  if (!agent) return response.status(400).json({ error: 'agent must be Codex or Claude' })
+  if (task.status === 'running' || task.status === 'waiting_for_approval' || activeCodexTasks.has(task.id)) return response.status(409).json({ error: 'Interrupt or finish the current turn before switching agents' })
+  const model = typeof request.body?.model === 'string' ? request.body.model.trim() : undefined
+  const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : undefined
+  if (agent === task.agent) return response.json(task)
+  if (agent === 'Claude') {
+    try { await claude.ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+  }
+  const lastSequence = eventSequences.get(task.id) ?? 0
+  const sessions = { ...(task.agentSessions ?? {}) }
+  // Park the current agent's session so switching back resumes it.
+  sessions[task.agent] = { sessionId: task.remoteSessionId, lastSequence, memorySession: task.memorySession, checkpointSession: task.checkpointSession }
+  const incoming = sessions[agent]
+  delete sessions[agent]
+  const from = task.agent
+  task.agent = agent
+  task.agentSessions = sessions
+  task.remoteSessionId = incoming?.sessionId
+  task.memorySession = incoming?.memorySession
+  task.checkpointSession = incoming?.checkpointSession
+  task.activeTurnId = undefined
+  task.model = model || undefined
+  task.reasoningEffort = reasoningEffort || undefined
+  // The incoming agent only needs what happened since it last worked on the task.
+  task.handoffPending = { from, sinceSequence: incoming?.lastSequence ?? 0 }
+  appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text: `Switched from ${from} to ${agent}. ${agent} receives a handoff of what Relay recorded with the next message.`, method: 'relay/agent-switch', logType: 'status', agent }, sequence: 0, createdAt: new Date().toISOString() })
+  persist(task.projectId)
+  broadcast({ type: 'task_agent_changed', taskId: task.id, agent, model: task.model ?? null, reasoningEffort: task.reasoningEffort ?? null })
+  const { tokenUsage: _tokenUsage, ...publicTask } = task
+  return response.json(publicTask)
+})
+
 app.post('/api/projects/:projectId/tasks', async (request, response) => {
   const project = projects.find(item => item.id === request.params.projectId)
   const title = typeof request.body?.title === 'string' ? stripInjectedPromptContext(request.body.title) : ''
@@ -1240,7 +1532,7 @@ app.post('/api/projects/:projectId/tasks', async (request, response) => {
   const task = { id: `task-${randomUUID()}`, projectId: project.id, title, agent, ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}), status: 'running' as const, createdAt: now, lastActivityAt: now, executionStartedAt: now, executionDurationMs: 0 }
   tasks.unshift(task)
   appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'user_message', payload: { text: title }, sequence: 0, createdAt: now })
-  startAgentTask(task, title, project.path)
+  startAgentTask(task, prepareAgentPrompt(task, project.path, title), project.path)
   return response.status(201).json(task)
 })
 
@@ -1269,7 +1561,7 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
   if (task.agent === 'Claude') {
     const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
     // A message sent mid-turn joins the running Claude process as the next prompt.
-    if (!claude.push(task.id, message)) startClaudeTurn(task, message, projectPath)
+    if (!claude.push(task.id, message)) startClaudeTurn(task, prepareAgentPrompt(task, projectPath, message, event.id), projectPath)
   } else if (task.agent === 'Codex') {
     const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
     activeCodexTasks.add(task.id)
@@ -1282,8 +1574,8 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
         })
         .catch(error => failTask(task, error))
     } else if (task.remoteSessionId) {
-      void resumeOrRestoreThread(task, projectPath, message).catch(error => failTask(task, error))
-    } else startCodexTask(task, message, projectPath)
+      void resumeOrRestoreThread(task, projectPath, prepareAgentPrompt(task, projectPath, message, event.id)).catch(error => failTask(task, error))
+    } else startCodexTask(task, prepareAgentPrompt(task, projectPath, message, event.id), projectPath)
   }
   return response.status(202).json({ accepted: true, event })
 })
@@ -1379,6 +1671,7 @@ const shutdown = () => {
   }
   codex.stop()
   claude.stopAll()
+  memoryWatcher.stopAll()
   server.close(() => process.exit(0))
 }
 process.once('SIGINT', shutdown)

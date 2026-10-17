@@ -16,6 +16,7 @@ type ApiTask = {
   executionStartedAt?: string
   executionDurationMs?: number
   pendingApprovals?: PendingApproval[]
+  handoffTokens?: number
 }
 
 const projectId = () => sessionStorage.getItem('relay-active-project-id') ?? ''
@@ -46,6 +47,7 @@ const toTask = (task: ApiTask): Task => ({
   executionStartedAt: task.executionStartedAt,
   executionDurationMs: task.executionDurationMs,
   pendingApprovals: task.pendingApprovals,
+  handoffTokens: task.handoffTokens,
 })
 
 export const apiAgentService: AgentService = {
@@ -89,6 +91,16 @@ export const apiAgentService: AgentService = {
       const body = await response.json() as { error?: string }
       throw new Error(body.error ?? 'Unable to save task model')
     }
+    return toTask(await response.json() as ApiTask)
+  },
+  async switchAgent(task, agent, model, reasoningEffort) {
+    if (!task.id) throw new Error('Task id is missing')
+    const response = await authenticatedFetch(`/api/tasks/${encodeURIComponent(task.id)}/agent`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent, model, reasoningEffort }),
+    })
+    if (!response.ok) throw await requestError(response, 'Unable to switch agent')
     return toTask(await response.json() as ApiTask)
   },
   async sendMessage(task, message, model, reasoningEffort) {
@@ -156,8 +168,8 @@ export async function listClaudeModels(): Promise<CodexModel[]> {
 export async function listTaskEvents(taskId: string) {
   const response = await authenticatedFetch(`/api/tasks/${taskId}/events`)
   if (!response.ok) throw new Error('Unable to load task events')
-  const body = await response.json() as { items: Array<{ id: string; taskId: string; type?: string; createdAt: string; payload?: { text?: string; raw?: unknown; method?: string; itemId?: string; logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'; progressState?: 'running' | 'completed'; error?: boolean; stderr?: boolean } }> }
-  return body.items.reduce<Array<{ id: string; taskId: string; text: string; method?: string; itemId?: string; createdAt: string; role: 'user' | 'assistant' | 'progress'; eventType?: string; logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'; progressState?: 'running' | 'completed' }>>((result, event) => {
+  const body = await response.json() as { items: Array<{ id: string; taskId: string; type?: string; createdAt: string; payload?: { text?: string; raw?: unknown; method?: string; itemId?: string; logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'; progressState?: 'running' | 'completed'; error?: boolean; stderr?: boolean; agent?: AgentName } }> }
+  return body.items.reduce<Array<{ id: string; taskId: string; text: string; method?: string; itemId?: string; createdAt: string; role: 'user' | 'assistant' | 'progress'; eventType?: string; logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'; progressState?: 'running' | 'completed'; agent?: AgentName }>>((result, event) => {
     const text = event.payload?.text ?? (event.payload?.raw ? JSON.stringify(event.payload.raw) : '')
     const method = event.payload?.method
     if (!text) return result
@@ -172,7 +184,7 @@ export async function listTaskEvents(taskId: string) {
     if (deltaMessage) {
       deltaMessage.text += text
       deltaMessage.createdAt = event.createdAt
-    } else result.push({ id: event.id, taskId: event.taskId, text, method, itemId: event.payload?.itemId, createdAt: event.createdAt, role, eventType: event.type, logType, progressState: event.payload?.progressState })
+    } else result.push({ id: event.id, taskId: event.taskId, text, method, itemId: event.payload?.itemId, createdAt: event.createdAt, role, eventType: event.type, logType, progressState: event.payload?.progressState, agent: event.payload?.agent })
     return result
   }, [])
 }

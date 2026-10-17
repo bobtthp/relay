@@ -7,11 +7,14 @@ export type ProviderSettings = {
   deepseekApiKey?: string
   /** HTTP(S) proxy for agent traffic. Background services do not inherit a shell's proxy variables. */
   httpProxy?: string
+  /** Ask agents to keep a per-task checkpoint so a switched-in agent knows the progress. Costs tokens. */
+  checkpointsEnabled?: boolean
 }
 
 export type ProviderSettingsStatus = {
   deepseek: { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
   proxy: { url: string | null; systemProxy: string | null }
+  checkpointsEnabled: boolean
 }
 
 const dataDirectory = process.env.RELAY_DATA_DIR ?? path.join(os.homedir(), '.relay-web')
@@ -48,6 +51,7 @@ export function readProviderSettings(): ProviderSettings {
     return {
       ...(typeof stored.deepseekApiKey === 'string' && stored.deepseekApiKey ? { deepseekApiKey: stored.deepseekApiKey } : {}),
       ...(typeof stored.httpProxy === 'string' && normalizeProxyUrl(stored.httpProxy) ? { httpProxy: normalizeProxyUrl(stored.httpProxy) } : {}),
+      ...(stored.checkpointsEnabled === true ? { checkpointsEnabled: true } : {}),
     }
   } catch {
     return {}
@@ -110,5 +114,6 @@ export function providerSettingsStatus(settings: ProviderSettings): ProviderSett
       keyHint: key ? `…${key.slice(-4)}` : null,
     },
     proxy: { url: settings.httpProxy ? maskProxy(settings.httpProxy) : null, systemProxy: detectSystemProxy() },
+    checkpointsEnabled: settings.checkpointsEnabled === true,
   }
 }

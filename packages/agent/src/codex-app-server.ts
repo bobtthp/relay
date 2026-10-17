@@ -10,6 +10,15 @@ const codexBinary = process.env.CODEX_BIN ?? 'codex'
 
 export type CodexLaunchOptions = () => { env: NodeJS.ProcessEnv; configOverrides: string[] }
 
+/** Per-thread settings Relay applies on both thread/start and thread/resume, so resumed threads match new ones. */
+export type CodexThreadOptions = { modelProvider?: string; developerInstructions?: string; writableRoots?: string[] }
+
+const threadParams = (options: CodexThreadOptions = {}) => ({
+  ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}),
+  ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
+  ...(options.writableRoots?.length ? { config: { sandbox_workspace_write: { writable_roots: options.writableRoots } } } : {}),
+})
+
 export class CodexAppServer {
   constructor(private readonly launchOptions: CodexLaunchOptions = () => ({ env: process.env, configOverrides: [] })) {}
 
@@ -88,23 +97,24 @@ export class CodexAppServer {
     })
   }
 
-  async startThread(cwd: string, modelProvider?: string) {
+  async startThread(cwd: string, options?: CodexThreadOptions) {
     await this.ensureStarted()
-    const result = await this.request('thread/start', { cwd, ...(modelProvider ? { modelProvider } : {}) })
+    const result = await this.request('thread/start', { cwd, ...threadParams(options) })
     const thread = result.thread as { id?: string } | undefined
     if (!thread?.id) throw new Error('Codex app-server did not return a thread id')
     return thread.id
   }
 
-  async resumeThread(threadId: string, cwd: string, modelProvider?: string) { await this.ensureStarted(); await this.request('thread/resume', { threadId, cwd, ...(modelProvider ? { modelProvider } : {}) }) }
+  /** Returns the resume result, including the thread's effective `sandbox` policy. */
+  async resumeThread(threadId: string, cwd: string, options?: CodexThreadOptions) { await this.ensureStarted(); return this.request('thread/resume', { threadId, cwd, ...threadParams(options) }) }
   async injectItems(threadId: string, items: Array<Record<string, unknown>>) { await this.ensureStarted(); await this.request('thread/inject_items', { threadId, items }) }
-  async startTurn(threadId: string, text: string, cwd: string, model?: string, effort?: string) {
+  async startTurn(threadId: string, text: string, cwd: string, model?: string, effort?: string, sandboxPolicy?: Record<string, unknown>) {
     await this.ensureStarted()
     // Luna is the display model for the reserve quota, but the app-server
     // route must use the hidden reserve model id. Sending gpt-5.6-luna or
     // gpt-6-luna directly uses the regular model quota and can be rejected.
     const explicitModel = model?.toLowerCase().includes('luna') ? 'gpt-reserve' : model
-    await this.request('turn/start', { threadId, cwd, ...(explicitModel ? { model: explicitModel } : {}), ...(effort ? { effort } : {}), input: [{ type: 'text', text }] })
+    await this.request('turn/start', { threadId, cwd, ...(explicitModel ? { model: explicitModel } : {}), ...(effort ? { effort } : {}), ...(sandboxPolicy ? { sandboxPolicy } : {}), input: [{ type: 'text', text }] })
   }
   async steerTurn(threadId: string, turnId: string, text: string) { await this.ensureStarted(); await this.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] }) }
   async interruptTurn(threadId: string, turnId: string) { await this.ensureStarted(); await this.request('turn/interrupt', { threadId, turnId }) }
@@ -121,6 +131,38 @@ export class CodexAppServer {
     } while (cursor)
     return models
   }
+  /**
+   * A single question on a throwaway read-only thread that never asks for
+   * approval; used for maintenance jobs such as consolidating shared memory.
+   */
+  async runOneShot(cwd: string, prompt: string, options: { model?: string; developerInstructions: string }) {
+    await this.ensureStarted()
+    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions })
+    const threadId = (result.thread as { id?: string } | undefined)?.id
+    if (!threadId) throw new Error('Codex app-server did not return a thread id')
+    let text = ''
+    let usage: { totalTokens: number; inputTokens: number; outputTokens: number } | undefined
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => { unsubscribe(); reject(new Error('Codex did not finish within 5 minutes')) }, 5 * 60_000)
+      const unsubscribe = this.onNotification(message => {
+        const params = message.params ?? {}
+        if (params.threadId !== threadId) return
+        if (message.method === 'item/agentMessage/delta' && typeof params.delta === 'string') text += params.delta
+        const tokenUsage = (params.tokenUsage as { total?: { totalTokens?: number; inputTokens?: number; outputTokens?: number } } | undefined)?.total
+        if (message.method === 'thread/tokenUsage/updated' && typeof tokenUsage?.totalTokens === 'number') usage = { totalTokens: tokenUsage.totalTokens, inputTokens: tokenUsage.inputTokens ?? 0, outputTokens: tokenUsage.outputTokens ?? 0 }
+        if (message.method !== 'turn/completed') return
+        clearTimeout(timeout)
+        unsubscribe()
+        const turn = params.turn as { status?: string; error?: { message?: string } } | undefined
+        if (turn?.status === 'failed' || turn?.error) reject(new Error(turn.error?.message ?? 'Codex turn failed'))
+        else resolve()
+      })
+    })
+    await this.startTurn(threadId, prompt, cwd, options.model)
+    await done
+    return { text, usage }
+  }
+
   async readRateLimits() { await this.ensureStarted(); return this.request('account/rateLimits/read', {}) }
   stop() { this.process?.kill('SIGTERM') }
   /** Stops the current process; the next request starts one with fresh launch options. */

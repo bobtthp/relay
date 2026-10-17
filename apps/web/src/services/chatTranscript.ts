@@ -9,6 +9,8 @@ export type TranscriptMessage = {
   eventType?: string
   logType?: 'command' | 'test' | 'warning' | 'error' | 'status' | 'change' | 'tool'
   progressState?: 'running' | 'completed'
+  /** The agent that produced this message; a task can switch agents mid-way. */
+  agent?: 'Codex' | 'Claude'
 }
 
 export function mergeSessionTimeline(history: Array<{ role: 'user' | 'assistant'; text: string }>, events: TranscriptMessage[]): TranscriptMessage[] {
@@ -37,7 +39,9 @@ export function mergeSessionTimeline(history: Array<{ role: 'user' | 'assistant'
     return merged
   }
   const firstHistoryMatch = history.findIndex(message => message.role === 'user' && normalize(message.text) === normalize(events[eventStart].text))
-  return [...history.slice(0, firstHistoryMatch), ...events.slice(eventStart)]
+  // Keep every captured event: after an agent switch the current session's
+  // history starts mid-task, and earlier turns exist only in Relay's events.
+  return [...history.slice(0, firstHistoryMatch), ...events]
 }
 
 export const isExecutionLog = (message: TranscriptMessage) => message.role === 'progress' || message.logType != null
