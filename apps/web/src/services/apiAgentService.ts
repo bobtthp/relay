@@ -20,6 +20,18 @@ type ApiTask = {
 
 const projectId = () => sessionStorage.getItem('relay-active-project-id') ?? ''
 
+/** An API error that keeps the backend's machine-readable `code` (e.g. claude_not_installed). */
+export class AgentRequestError extends Error {
+  constructor(message: string, readonly code?: string) { super(message) }
+}
+
+const requestError = async (response: Response, fallback: string) => {
+  try {
+    const body = await response.json() as { error?: string; code?: string }
+    return new AgentRequestError(body.error || fallback, body.code)
+  } catch { return new AgentRequestError(fallback) }
+}
+
 const toTask = (task: ApiTask): Task => ({
   id: task.id,
   remoteSessionId: task.remoteSessionId,
@@ -63,7 +75,7 @@ export const apiAgentService: AgentService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agent, title, model, reasoningEffort }),
     })
-    if (!response.ok) throw new Error('Unable to create task')
+    if (!response.ok) throw await requestError(response, 'Unable to create task')
     return toTask(await response.json() as ApiTask)
   },
   async updateTaskModel(task, model, reasoningEffort) {
@@ -86,7 +98,7 @@ export const apiAgentService: AgentService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, model, reasoningEffort }),
     })
-    if (!response.ok) throw new Error('Unable to send message')
+    if (!response.ok) throw await requestError(response, 'Unable to send message')
     return { ok: true, message: `${task.agent} received: ${message}` }
   },
   async interruptTask(task) {
@@ -125,11 +137,18 @@ export const apiAgentService: AgentService = {
   },
 }
 
-export type CodexModel = { model: string; displayName: string; description?: string; isDefault?: boolean; hidden?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: Array<{ reasoningEffort: string; description: string }> }
+export type CodexModel = { model: string; agent?: AgentName; displayName: string; description?: string; isDefault?: boolean; hidden?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: Array<{ reasoningEffort: string; description: string }> }
 
 export async function listCodexModels(): Promise<CodexModel[]> {
   const response = await authenticatedFetch('/api/models')
   if (!response.ok) throw new Error('Unable to load Codex models')
+  const body = await response.json() as { items?: CodexModel[] }
+  return body.items ?? []
+}
+
+export async function listClaudeModels(): Promise<CodexModel[]> {
+  const response = await authenticatedFetch('/api/models?agent=Claude')
+  if (!response.ok) throw new Error('Unable to load Claude models')
   const body = await response.json() as { items?: CodexModel[] }
   return body.items ?? []
 }

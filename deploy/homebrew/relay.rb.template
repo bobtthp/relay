@@ -12,6 +12,10 @@ class Relay < Formula
   def install
     system "npm", "ci", "--no-audit", "--fund=false"
     system "npm", "run", "build"
+    # Relay runs the user's own Claude Code, so drop the Agent SDK's bundled
+    # binary (~219MB) and the peer packages only its unused entry points load.
+    system "npm", "prune", "--omit=peer", "--no-audit", "--fund=false"
+    rm_r Dir["node_modules/@anthropic-ai/claude-agent-sdk-*"]
 
     libexec.install "dist-server", "node_modules"
     (libexec/"dist").install "dist/web"
