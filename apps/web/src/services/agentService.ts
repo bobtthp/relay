@@ -13,6 +13,8 @@ export type Task = {
   tokenUsage?: { inputTokens: number; cachedInputTokens: number; outputTokens: number; totalTokens: number }
   executionStartedAt?: string
   executionDurationMs?: number
+  /** Estimated tokens spent on agent handoffs and checkpoint rules. */
+  handoffTokens?: number
   pendingApprovals?: Array<{ id: string; kind: 'command' | 'file_change' | 'permissions' | 'mcp_form' | 'mcp_url' | 'user_input'; reason?: string; command?: string; cwd?: string; networkContext?: Record<string, unknown>; permissions?: Record<string, unknown>; changes?: Array<{ path: string; kind: string; diff: string }>; serverName?: string; message?: string; requestedSchema?: Record<string, unknown>; url?: string; elicitationId?: string; questions?: Array<{ id: string; header: string; question: string; isOther?: boolean; isSecret?: boolean; options?: Array<{ label: string; description: string }> }>; canApprove: boolean }>
 }
 
@@ -22,6 +24,7 @@ export type AgentService = {
   restoreDeletedTask(projectId: string, sessionId: string): Promise<Task>
   createTask(agent: AgentName, title: string, model?: string, reasoningEffort?: string): Promise<Task>
   updateTaskModel(task: Task, model: string, reasoningEffort: string): Promise<Task>
+  switchAgent(task: Task, agent: AgentName, model?: string, reasoningEffort?: string): Promise<Task>
   sendMessage(task: Task, message: string, model?: string, reasoningEffort?: string): Promise<{ ok: true; message: string }>
   interruptTask(task: Task): Promise<void>
   deleteTask(task: Task): Promise<void>

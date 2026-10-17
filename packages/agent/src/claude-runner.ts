@@ -108,7 +108,16 @@ export type ClaudeTurnCallbacks = {
   requestPermission: (request: ClaudeToolRequest) => Promise<PermissionResult>
 }
 
-export type ClaudeTurnOptions = { cwd: string; resume?: string; model?: string; effort?: string }
+export type ClaudeTurnOptions = {
+  cwd: string
+  resume?: string
+  model?: string
+  effort?: string
+  /** Shared project memory: redirects Claude's auto-memory here and appends Relay's memory rules. */
+  memory?: { directory: string; promptAppend: string }
+  /** Directories outside cwd Claude may edit without an approval prompt (task checkpoints). */
+  writableDirectories?: string[]
+}
 
 const effortLevels = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -253,7 +262,14 @@ export class ClaudeRunner {
         ...executable,
         includePartialMessages: true,
         permissionMode: 'default',
-        systemPrompt: { type: 'preset', preset: 'claude_code' },
+        // The claude_code preset is what enables auto-memory at all.
+        systemPrompt: { type: 'preset', preset: 'claude_code', ...(options.memory ? { append: options.memory.promptAppend } : {}) },
+        ...(options.writableDirectories?.length ? { additionalDirectories: options.writableDirectories } : {}),
+        ...(options.memory || options.writableDirectories?.length ? { settings: {
+          ...(options.memory ? { autoMemoryEnabled: true, autoMemoryDirectory: options.memory.directory } : {}),
+          // `//` marks an absolute path in permission rules; Edit rules also cover Write.
+          ...(options.writableDirectories?.length ? { permissions: { allow: options.writableDirectories.map(directory => `Edit(/${directory}/**)`) } } : {}),
+        } } : {}),
         canUseTool: (toolName, input, context) => callbacks.requestPermission({ toolName, input, toolUseId: context.toolUseID, blockedPath: context.blockedPath, signal: context.signal }),
       },
     })
@@ -312,6 +328,29 @@ export class ClaudeRunner {
       prompts.close()
       probe.close()
     }
+  }
+
+  /**
+   * A single question with no tools, no project settings and no saved session:
+   * used for maintenance jobs such as consolidating shared memory.
+   */
+  async runOneShot(prompt: string, options: { model?: string; systemPrompt: string }) {
+    const claudeQuery = query({
+      prompt,
+      options: { ...await this.executableOptions(), ...(options.model ? { model: options.model } : {}), systemPrompt: options.systemPrompt, tools: [], maxTurns: 1, settingSources: [], persistSession: false },
+    })
+    let text = ''
+    let usage: TokenUsage | undefined
+    for await (const message of claudeQuery as AsyncIterable<SDKMessage>) {
+      if (message.type === 'assistant') for (const block of message.message.content) if (block.type === 'text') text += block.text
+      if (message.type === 'result') {
+        const value = message.usage
+        const input = (value.input_tokens ?? 0) + (value.cache_read_input_tokens ?? 0) + (value.cache_creation_input_tokens ?? 0)
+        usage = { inputTokens: input, cachedInputTokens: value.cache_read_input_tokens ?? 0, outputTokens: value.output_tokens ?? 0, totalTokens: input + (value.output_tokens ?? 0) }
+        if (message.subtype !== 'success') throw new Error(message.errors.join('\n') || `Claude stopped: ${message.subtype}`)
+      }
+    }
+    return { text, usage }
   }
 
   async readHistory(sessionId: string, cwd: string) {

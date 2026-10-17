@@ -55,6 +55,21 @@ export type Task = {
   remoteSessionId?: string
   remoteSessionAliases?: string[]
   model?: string
+  /** Estimated extra tokens spent on shared project memory: injected context and memory reads/writes. */
+  memoryTokens?: { injected: number; tools: number }
+  /** Memory directory the agent's session already knows about (set at session start or by a one-time primer). */
+  memorySession?: string
+  /** Whether the current agent session already received the checkpoint rule. */
+  checkpointSession?: boolean
+  /**
+   * Sessions of the agents this task is not currently using, so switching back
+   * resumes them. `lastSequence` is the last event that agent saw.
+   */
+  agentSessions?: Partial<Record<AgentName, { sessionId?: string; lastSequence: number; memorySession?: string; checkpointSession?: boolean }>>
+  /** Set by an agent switch; the next turn receives a handoff built from events after `sinceSequence`. */
+  handoffPending?: { from: AgentName; sinceSequence: number }
+  /** Estimated tokens spent on agent handoffs and checkpoint rules. */
+  handoffTokens?: number
   /** Codex model provider the thread was last started or resumed with. */
   modelProvider?: string
   reasoningEffort?: string

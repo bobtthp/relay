@@ -58,3 +58,15 @@ test('a history response cannot overwrite deltas received while the request was 
   const live = [{ id: 'newest-delta', taskId: 'task-1', role: 'assistant' as const, method: 'item/agentMessage/delta', itemId: 'item-1', text: markdown }]
   assert.equal(mergeEventSnapshots(snapshot, live)[0]?.text, markdown)
 })
+
+test('turns from before an agent switch stay in the timeline', () => {
+  const events = [
+    { id: 'e1', role: 'user' as const, text: 'Create notes.txt' },
+    { id: 'e2', role: 'assistant' as const, agent: 'Codex' as const, text: 'Created notes.txt.' },
+    { id: 'e3', role: 'user' as const, text: 'Append step2' },
+    { id: 'e4', role: 'assistant' as const, agent: 'Claude' as const, text: 'Appended step2.' },
+  ]
+  // The new agent's session only knows the turns after the switch.
+  const claudeHistory = [{ role: 'user' as const, text: 'Append step2' }, { role: 'assistant' as const, text: 'Appended step2.' }]
+  assert.deepEqual(mergeSessionTimeline(claudeHistory, events).map(message => message.id), ['e1', 'e2', 'e3', 'e4'])
+})

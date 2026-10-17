@@ -8,7 +8,9 @@ export type DeletedTask = { task: Task; events: SessionEvent[]; deletedAt: strin
 type CacheState = { tasks: Task[]; events: SessionEvent[]; hiddenCodexSessionIds?: string[]; deletedTasks?: DeletedTask[] }
 
 const relayDataDirectory = process.env.RELAY_DATA_DIR ?? path.join(os.homedir(), '.relay-web')
-const cachePath = (projectPath: string) => path.join(relayDataDirectory, 'projects', createHash('sha256').update(projectPath).digest('hex'), 'state.json')
+/** Per-project data lives under $RELAY_DATA_DIR/projects/<sha256 of the absolute project path>/. */
+export const projectDataDirectory = (projectPath: string) => path.join(relayDataDirectory, 'projects', createHash('sha256').update(projectPath).digest('hex'))
+const cachePath = (projectPath: string) => path.join(projectDataDirectory(projectPath), 'state.json')
 
 const readState = (target: string): CacheState | null => {
   try {

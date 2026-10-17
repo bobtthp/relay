@@ -36,6 +36,7 @@ export function stripInjectedPromptContext(text: string): string {
   return text
     .replace(/<recommended_plugins\b[^>]*>[\s\S]*?<\/recommended_plugins\s*>/gi, '')
     .replace(/<environment_context\b[^>]*>[\s\S]*?<\/environment_context\s*>/gi, '')
+    .replace(/<relay_(?:shared_memory|handoff|checkpoint)\b[^>]*>[\s\S]*?<\/relay_(?:shared_memory|handoff|checkpoint)\s*>/gi, '')
     .trim()
 }
 
