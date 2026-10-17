@@ -8,7 +8,11 @@ type ServerRequestHandler = (message: RpcMessage & { id: RpcId; method: string }
 
 const codexBinary = process.env.CODEX_BIN ?? 'codex'
 
+export type CodexLaunchOptions = () => { env: NodeJS.ProcessEnv; configOverrides: string[] }
+
 export class CodexAppServer {
+  constructor(private readonly launchOptions: CodexLaunchOptions = () => ({ env: process.env, configOverrides: [] })) {}
+
   private process?: ChildProcessWithoutNullStreams
   private startup?: Promise<void>
   private nextId = 1
@@ -22,7 +26,8 @@ export class CodexAppServer {
   private async ensureStarted() {
     if (this.startup) return this.startup
     this.startup = new Promise<void>((resolve, reject) => {
-      const child = spawn(codexBinary, ['app-server'], { stdio: 'pipe', env: process.env })
+      const { env, configOverrides } = this.launchOptions()
+      const child = spawn(codexBinary, ['app-server', ...configOverrides.flatMap(override => ['-c', override])], { stdio: 'pipe', env })
       this.process = child
       createInterface({ input: child.stdout }).on('line', line => {
         try {
@@ -45,6 +50,8 @@ export class CodexAppServer {
       })
       child.once('error', reject)
       child.once('exit', (code, signal) => {
+        // After restart() a replacement process may already own this client.
+        if (this.process && this.process !== child) return
         this.process = undefined
         this.startup = undefined
         for (const pending of this.pending.values()) { clearTimeout(pending.timeout); pending.reject(new Error(`Codex app-server exited (${signal ?? code ?? 'unknown'})`)) }
@@ -81,15 +88,15 @@ export class CodexAppServer {
     })
   }
 
-  async startThread(cwd: string) {
+  async startThread(cwd: string, modelProvider?: string) {
     await this.ensureStarted()
-    const result = await this.request('thread/start', { cwd })
+    const result = await this.request('thread/start', { cwd, ...(modelProvider ? { modelProvider } : {}) })
     const thread = result.thread as { id?: string } | undefined
     if (!thread?.id) throw new Error('Codex app-server did not return a thread id')
     return thread.id
   }
 
-  async resumeThread(threadId: string, cwd: string) { await this.ensureStarted(); await this.request('thread/resume', { threadId, cwd }) }
+  async resumeThread(threadId: string, cwd: string, modelProvider?: string) { await this.ensureStarted(); await this.request('thread/resume', { threadId, cwd, ...(modelProvider ? { modelProvider } : {}) }) }
   async injectItems(threadId: string, items: Array<Record<string, unknown>>) { await this.ensureStarted(); await this.request('thread/inject_items', { threadId, items }) }
   async startTurn(threadId: string, text: string, cwd: string, model?: string, effort?: string) {
     await this.ensureStarted()
@@ -116,4 +123,12 @@ export class CodexAppServer {
   }
   async readRateLimits() { await this.ensureStarted(); return this.request('account/rateLimits/read', {}) }
   stop() { this.process?.kill('SIGTERM') }
+  /** Stops the current process; the next request starts one with fresh launch options. */
+  restart() {
+    const child = this.process
+    if (!child) return
+    this.process = undefined
+    this.startup = undefined
+    child.kill('SIGTERM')
+  }
 }

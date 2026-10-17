@@ -55,6 +55,8 @@ export type Task = {
   remoteSessionId?: string
   remoteSessionAliases?: string[]
   model?: string
+  /** Codex model provider the thread was last started or resumed with. */
+  modelProvider?: string
   reasoningEffort?: string
   tokenUsage?: TokenUsage
   activeTurnId?: string

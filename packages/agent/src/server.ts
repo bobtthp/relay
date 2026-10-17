@@ -11,10 +11,13 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { events, machines, projects, refreshProjects, tasks } from './local-state.js'
 import type { AgentName, PendingApproval, SessionEvent } from '../../protocol/src/types.js'
 import { CodexAppServer, type RpcId } from './codex-app-server.js'
+import { ClaudeRunner, ClaudeUnavailableError, type ClaudeToolRequest } from './claude-runner.js'
+import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { loadProjectCache, saveProjectCache, type DeletedTask } from './project-cache.js'
 import { discoverCodexTasks, readCodexSessionHistory, readCodexSessionHistoryPage, readCodexSessionTokenUsage, refreshCodexSessionCache, stripInjectedPromptContext } from './codex-history.js'
 import { listDirectories, removeSavedProject, saveSelectedProject, validateProjectPath } from './local-project.js'
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
+import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 
 const app = express()
 const server = createServer(app)
@@ -53,10 +56,41 @@ let shuttingDown = false
 const eventSequences = new Map<string, number>()
 const hiddenCodexSessionIds = new Set<string>()
 const deletedTasks: DeletedTask[] = []
-const codex = new CodexAppServer()
+let providerSettings = readProviderSettings()
+const claude = new ClaudeRunner(() => ({ ...process.env, ...proxyEnvironment(providerSettings) }))
+const codex = new CodexAppServer(() => {
+  const deepseekKey = effectiveDeepSeekKey(providerSettings)
+  return { env: { ...process.env, ...proxyEnvironment(providerSettings), ...(deepseekKey ? { [DEEPSEEK_ENV_KEY]: deepseekKey } : {}) }, configOverrides: deepseekProviderOverrides }
+})
+// Codex reads provider keys from its environment at launch, so a changed key
+// needs a fresh app-server. Wait for active turns so none are cut off.
+let codexRestartPending = false
+const restartCodexWhenIdle = () => {
+  if (!codexRestartPending || activeCodexTasks.size > 0) return
+  codexRestartPending = false
+  codex.restart()
+}
+// Threads keep the provider they were started with, so switching between a
+// DeepSeek model and a ChatGPT model must name the provider on resume.
+const modelProviderForTask = (task: { model?: string; modelProvider?: string }) => isDeepSeekModel(task.model)
+  ? DEEPSEEK_PROVIDER_ID
+  : task.modelProvider === DEEPSEEK_PROVIDER_ID ? 'openai' : undefined
+const rememberModelProvider = (task: typeof tasks[number]) => { task.modelProvider = isDeepSeekModel(task.model) ? DEEPSEEK_PROVIDER_ID : undefined }
 let approvalSettings = readApprovalSettings()
 const automaticApprovalKinds = new Set<PendingApproval['kind']>(['command', 'file_change', 'permissions'])
-const pendingApprovalRequests = new Map<string, { taskId: string; itemId: string; rpcId: RpcId; kind: PendingApproval['kind']; requestedPermissions?: Record<string, unknown>; requestedSchema?: Record<string, unknown>; questions?: NonNullable<PendingApproval['questions']> }>()
+type PendingApprovalRequest = {
+  taskId: string
+  itemId: string
+  kind: PendingApproval['kind']
+  requestedPermissions?: Record<string, unknown>
+  requestedSchema?: Record<string, unknown>
+  questions?: NonNullable<PendingApproval['questions']>
+  /** Codex approvals are answered over JSON-RPC. */
+  rpcId?: RpcId
+  /** Claude approvals resolve the SDK's canUseTool promise. */
+  claude?: { input: Record<string, unknown>; resolve: (result: PermissionResult) => void }
+}
+const pendingApprovalRequests = new Map<string, PendingApprovalRequest>()
 const fileChangePreviews = new Map<string, PendingApproval['changes']>()
 const execFileAsync = promisify(execFile)
 type EnvironmentTool = 'codex' | 'claude'
@@ -126,7 +160,13 @@ const broadcast = (message: unknown) => {
   websocket.clients.forEach(client => { if (client.readyState === WebSocket.OPEN && authenticatedSockets.has(client)) client.send(encoded) })
 }
 
-const broadcastTaskStatus = (task: typeof tasks[number]) => broadcast({
+claude.onRateLimits(rateLimits => broadcast({ type: 'claude_rate_limits', rateLimits }))
+
+const broadcastTaskStatus = (task: typeof tasks[number]) => {
+  restartCodexWhenIdle()
+  broadcastTaskStatusMessage(task)
+}
+const broadcastTaskStatusMessage = (task: typeof tasks[number]) => broadcast({
   type: 'task_status',
   taskId: task.id,
   status: task.status,
@@ -234,7 +274,9 @@ const upsertProgressEvent = (taskId: string, progressKey: string, text: string, 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
 const isQuotaError = (text: string) => /(?:rate.?limit|quota|usage limit|too many requests|capacity|credits?)/i.test(text)
 const isLunaModelName = (model?: string) => model?.toLowerCase().includes('luna') === true
-const quotaErrorText = (task: typeof tasks[number]) => isLunaModelName(task.model)
+const quotaErrorText = (task: typeof tasks[number]) => task.agent === 'Claude'
+  ? `Claude usage limit reached for ${task.model ?? 'the current model'}. Wait for the limit to reset or continue in a Codex task.`
+  : isLunaModelName(task.model)
   ? `The ${task.model ?? 'Luna'} quota is exhausted. Wait for the quota reset or choose another available model.`
   : `The ${task.model ?? 'current model'} quota is exhausted. Switch to Luna if it still has quota, or wait for the quota reset.`
 
@@ -356,7 +398,8 @@ const restoreThreadFromLocalTranscript = async (task: typeof tasks[number], proj
     if (text) selectedHistory.unshift({ role: message.role, text })
   }
   const items = selectedHistory.map(message => ({ type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.text }] }))
-  const restoredThreadId = await codex.startThread(projectPath)
+  const restoredThreadId = await codex.startThread(projectPath, modelProviderForTask({ model: task.model }))
+  rememberModelProvider(task)
   await codex.injectItems(restoredThreadId, items)
   task.remoteSessionAliases = [...new Set([...(task.remoteSessionAliases ?? []), previousThreadId])]
   assignRemoteSession(task, restoredThreadId)
@@ -380,7 +423,8 @@ const resumeOrRestoreThread = async (task: typeof tasks[number], projectPath: st
   const threadId = task.remoteSessionId
   if (!threadId) throw new Error('This task has no Codex session to resume')
   try {
-    await codex.resumeThread(threadId, projectPath)
+    await codex.resumeThread(threadId, projectPath, modelProviderForTask(task))
+    rememberModelProvider(task)
     await codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort)
   } catch (error) {
     if (!isThreadNotFound(error)) throw error
@@ -463,9 +507,14 @@ codex.onServerRequest(message => {
     ...(typeof params.elicitationId === 'string' ? { elicitationId: params.elicitationId } : typeof params.elicitId === 'string' ? { elicitationId: params.elicitId } : {}),
     ...(questions ? { questions } : {}),
   }
-  pendingApprovalRequests.set(requestId, { taskId: task.id, itemId, rpcId: message.id, kind, ...(requestedPermissions ? { requestedPermissions } : {}), ...(requestedSchema ? { requestedSchema } : {}), ...(questions ? { questions } : {}) })
+  registerApproval(task, approval, { taskId: task.id, itemId, rpcId: message.id, kind, ...(requestedPermissions ? { requestedPermissions } : {}), ...(requestedSchema ? { requestedSchema } : {}), ...(questions ? { questions } : {}) })
+})
+
+const registerApproval = (task: typeof tasks[number], approval: PendingApproval, pending: PendingApprovalRequest) => {
+  const { id: requestId, kind } = approval
+  pendingApprovalRequests.set(requestId, pending)
   const automaticFormResponse = approvalSettings.autoAcceptDefaultMcpForms && approval.canApprove && kind === 'mcp_form'
-    ? getDefaultMcpFormResponse(requestedSchema)
+    ? getDefaultMcpFormResponse(pending.requestedSchema)
     : undefined
   const automaticResponse = approvalSettings.autoApproveConfirmations && approval.canApprove && automaticApprovalKinds.has(kind)
     ? { decision: 'accept' }
@@ -493,7 +542,7 @@ codex.onServerRequest(message => {
   persist(task.projectId)
   broadcastTaskStatus(task)
   broadcast({ type: 'approval_request', taskId: task.id, approval })
-})
+}
 
 const answerApproval = (task: typeof tasks[number], approvalId: string, responseBody: Record<string, unknown>) => {
   const pending = pendingApprovalRequests.get(approvalId)
@@ -539,7 +588,8 @@ const answerApproval = (task: typeof tasks[number], approvalId: string, response
     decision = responseBody.decision
     response = makeApprovalResponse(pending.kind, decision, pending.requestedPermissions)
   }
-  codex.respondToServerRequest(pending.rpcId, response)
+  if (pending.claude) pending.claude.resolve(claudePermissionResult(pending, decision, response))
+  else if (pending.rpcId !== undefined) codex.respondToServerRequest(pending.rpcId, response)
   pendingApprovalRequests.delete(approvalId)
   const remaining = (task.pendingApprovals ?? []).filter(approval => approval.id !== approvalId)
   task.pendingApprovals = remaining
@@ -551,10 +601,142 @@ const answerApproval = (task: typeof tasks[number], approvalId: string, response
   broadcastTaskStatus(task)
 }
 
+const claudeDeniedMessage = 'The user denied this request in Relay. Try another approach or ask the user.'
+const claudePermissionResult = (pending: PendingApprovalRequest, decision: 'accept' | 'decline', response: Record<string, unknown>): PermissionResult => {
+  const input = pending.claude?.input ?? {}
+  if (pending.kind === 'user_input') {
+    const answers = asRecord(response.answers) ?? {}
+    const byQuestion = Object.fromEntries((pending.questions ?? []).flatMap(question => {
+      const selected = asRecord(answers[question.id])?.answers
+      const text = Array.isArray(selected) ? selected.filter(item => typeof item === 'string' && item.trim()).join(', ') : ''
+      return text ? [[question.question, text]] : []
+    }))
+    return Object.keys(byQuestion).length ? { behavior: 'allow', updatedInput: { ...input, answers: byQuestion } } : { behavior: 'deny', message: 'The user declined to answer in Relay.' }
+  }
+  return decision === 'accept' ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: claudeDeniedMessage }
+}
+
+const lineDiff = (prefix: '+' | '-', text: string) => text.split('\n').map(line => `${prefix}${line}`).join('\n')
+const claudeFileChanges = (toolName: string, input: Record<string, unknown>): PendingApproval['changes'] => {
+  const filePath = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
+  if (!filePath) return undefined
+  if (toolName === 'Write') return [{ path: filePath, kind: fs.existsSync(filePath) ? 'update' : 'add', diff: lineDiff('+', String(input.content ?? '')) }]
+  const edits = toolName === 'MultiEdit' && Array.isArray(input.edits) ? input.edits.map(edit => asRecord(edit) ?? {}) : [input]
+  const diff = edits.map(edit => [
+    typeof edit.old_string === 'string' && edit.old_string ? lineDiff('-', edit.old_string) : '',
+    typeof edit.new_string === 'string' || typeof edit.new_source === 'string' ? lineDiff('+', String(edit.new_string ?? edit.new_source)) : '',
+  ].filter(Boolean).join('\n')).filter(Boolean).join('\n@@\n')
+  return [{ path: filePath, kind: 'update', diff }]
+}
+const claudeFileTools = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
+
+const requestClaudePermission = (task: typeof tasks[number], projectPath: string, request: ClaudeToolRequest) => new Promise<PermissionResult>(resolve => {
+  const { toolName, input } = request
+  const requestId = randomUUID()
+  let approval: PendingApproval
+  let questions: PendingApproval['questions']
+  if (toolName === 'AskUserQuestion' && Array.isArray(input.questions)) {
+    questions = input.questions.flatMap((raw, index) => {
+      const question = asRecord(raw)
+      if (!question || typeof question.question !== 'string') return []
+      const options = Array.isArray(question.options) ? question.options.flatMap(option => { const o = asRecord(option); return o && typeof o.label === 'string' ? [{ label: o.label, description: typeof o.description === 'string' ? o.description : '' }] : [] }) : []
+      return [{ id: `q${index}`, header: typeof question.header === 'string' ? question.header : `Q${index + 1}`, question: question.question, isOther: true, ...(options.length ? { options } : {}) }]
+    })
+    approval = { id: requestId, kind: 'user_input', canApprove: questions.length > 0, questions }
+  } else if (claudeFileTools.has(toolName)) {
+    const changes = claudeFileChanges(toolName, input)
+    approval = { id: requestId, kind: 'file_change', canApprove: Boolean(changes?.some(change => change.diff.trim())), ...(changes ? { changes } : {}) }
+  } else {
+    const command = toolName === 'Bash' && typeof input.command === 'string' ? input.command : `${toolName} ${JSON.stringify(input)}`
+    const reason = toolName === 'Bash' ? input.description : `Claude wants to use the ${toolName} tool.`
+    approval = { id: requestId, kind: 'command', canApprove: true, command, cwd: projectPath, ...(typeof reason === 'string' && reason ? { reason } : {}) }
+  }
+  if (request.blockedPath) approval.reason = `${approval.reason ? `${approval.reason}\n` : ''}Outside the allowed directories: ${request.blockedPath}`
+  const settle = (result: PermissionResult) => { request.signal.removeEventListener('abort', onAbort); resolve(result) }
+  const onAbort = () => {
+    if (!pendingApprovalRequests.delete(requestId)) return
+    task.pendingApprovals = (task.pendingApprovals ?? []).filter(item => item.id !== requestId)
+    broadcast({ type: 'approval_resolved', taskId: task.id, approvalId: requestId })
+    settle({ behavior: 'deny', message: claudeDeniedMessage })
+  }
+  request.signal.addEventListener('abort', onAbort, { once: true })
+  registerApproval(task, approval, { taskId: task.id, itemId: request.toolUseId ?? requestId, kind: approval.kind, ...(questions ? { questions } : {}), claude: { input, resolve: settle } })
+})
+
+const describeClaudeTool = (toolName: string, input: Record<string, unknown>, completed: boolean) => {
+  if (toolName === 'Bash') return { text: `${completed ? 'Finished command' : 'Running command'}: ${String(input.command ?? '')}`, logType: 'command' as const }
+  if (claudeFileTools.has(toolName)) return { text: `${completed ? 'Updated files' : 'Editing files'}: ${String(input.file_path ?? input.notebook_path ?? '')}`, logType: 'change' as const }
+  if (toolName === 'WebSearch' || toolName === 'WebFetch') return { text: `${completed ? 'Finished web request' : 'Searching the web'}: ${String(input.query ?? input.url ?? '')}`, logType: 'tool' as const }
+  const target = input.file_path ?? input.path ?? input.pattern ?? input.description
+  return { text: `${completed ? 'Finished' : 'Running'} ${toolName}${typeof target === 'string' && target ? `: ${target}` : ''}`, logType: 'tool' as const }
+}
+
+const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath: string) => {
+  activeCodexTasks.add(task.id)
+  const tools = new Map<string, { name: string; input: Record<string, unknown> }>()
+  claude.start(task.id, prompt, { cwd: projectPath, resume: task.remoteSessionId, model: task.model, effort: task.reasoningEffort }, {
+    onSessionId: sessionId => {
+      if (task.remoteSessionId === sessionId) return
+      assignRemoteSession(task, sessionId)
+      persist(task.projectId)
+      broadcast({ type: 'task_session_started', taskId: task.id, sessionId })
+    },
+    onTextDelta: (itemId, text) => appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text, method: 'item/agentMessage/delta', itemId }, sequence: 0, createdAt: new Date().toISOString() }),
+    onToolStarted: (toolUseId, name, input) => {
+      tools.set(toolUseId, { name, input })
+      const { text, logType } = describeClaudeTool(name, input, false)
+      appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text, method: 'relay/progress', progressState: 'running', logType, itemId: toolUseId }, sequence: 0, createdAt: new Date().toISOString() })
+    },
+    onToolFinished: (toolUseId, output, isError) => {
+      const tool = tools.get(toolUseId)
+      if (!tool) return
+      tools.delete(toolUseId)
+      const described = describeClaudeTool(tool.name, tool.input, true)
+      const isTest = tool.name === 'Bash' && /\b(test|vitest|jest|pytest|playwright|cypress|cargo test|go test)\b/i.test(String(tool.input.command ?? ''))
+      const logType = isError ? 'error' : isTest ? 'test' : described.logType
+      const changes = claudeFileTools.has(tool.name) ? claudeFileChanges(tool.name, tool.input) : undefined
+      const detail = changes ? formatFileChangeProgress(changes) : output.length > 8_000 ? `${output.slice(0, 8_000)}\n… output truncated …` : output
+      appendEvent({
+        id: `event-${randomUUID()}`,
+        taskId: task.id,
+        type: isError ? 'error' : changes ? 'file_change' : isTest ? 'test_result' : 'assistant_message',
+        payload: { text: detail ? `${described.text}\n\n${detail}` : described.text, method: 'relay/progress', progressState: 'completed', logType, itemId: toolUseId },
+        sequence: 0,
+        createdAt: new Date().toISOString(),
+      })
+    },
+    onUsage: usage => {
+      const previous = task.tokenUsage
+      task.tokenUsage = previous ? {
+        inputTokens: previous.inputTokens + usage.inputTokens,
+        cachedInputTokens: previous.cachedInputTokens + usage.cachedInputTokens,
+        outputTokens: previous.outputTokens + usage.outputTokens,
+        totalTokens: previous.totalTokens + usage.totalTokens,
+      } : usage
+    },
+    onFinished: (status, error) => {
+      if (status === 'failed') { forgetTaskApprovals(task); failTask(task, new Error(error ?? 'Claude turn failed')); return }
+      const now = new Date()
+      pauseTaskTimer(task, now)
+      forgetTaskApprovals(task)
+      task.status = status
+      task.lastActivityAt = now.toISOString()
+      activeCodexTasks.delete(task.id)
+      persist(task.projectId)
+      broadcastTaskStatus(task)
+    },
+    requestPermission: request => requestClaudePermission(task, projectPath, request),
+  }).catch(error => failTask(task, error))
+}
+
+const startAgentTask = (task: typeof tasks[number], prompt: string, projectPath: string) => task.agent === 'Claude'
+  ? startClaudeTurn(task, prompt, projectPath)
+  : startCodexTask(task, prompt, projectPath)
+
 const startCodexTask = (task: typeof tasks[number], prompt: string, projectPath: string) => {
   activeCodexTasks.add(task.id)
-  void codex.startThread(projectPath)
-    .then(threadId => { assignRemoteSession(task, threadId); persist(task.projectId); broadcast({ type: 'task_session_started', taskId: task.id, sessionId: threadId }); return codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort) })
+  void codex.startThread(projectPath, modelProviderForTask({ model: task.model }))
+    .then(threadId => { rememberModelProvider(task); assignRemoteSession(task, threadId); persist(task.projectId); broadcast({ type: 'task_session_started', taskId: task.id, sessionId: threadId }); return codex.startTurn(threadId, prompt, projectPath, task.model, task.reasoningEffort) })
     .catch(error => failTask(task, error))
 }
 
@@ -692,12 +874,47 @@ app.put('/api/settings/approvals', (request, response) => {
   return response.json(approvalSettings)
 })
 
+app.get('/api/settings/providers', (_request, response) => response.json(providerSettingsStatus(providerSettings)))
+app.put('/api/settings/providers', (request, response) => {
+  const body = asRecord(request.body) ?? {}
+  if (!('deepseekApiKey' in body) && !('httpProxy' in body)) return response.status(400).json({ error: 'Provide deepseekApiKey or httpProxy' })
+  const next = { ...providerSettings }
+  if ('deepseekApiKey' in body) {
+    const key = body.deepseekApiKey
+    if (key !== null && typeof key !== 'string') return response.status(400).json({ error: 'deepseekApiKey must be a string or null' })
+    const trimmed = typeof key === 'string' ? key.trim() : ''
+    if (typeof key === 'string' && (!trimmed || trimmed.length > 512 || /\s/.test(trimmed))) return response.status(400).json({ error: 'Enter a valid DeepSeek API key' })
+    if (trimmed) next.deepseekApiKey = trimmed
+    else delete next.deepseekApiKey
+  }
+  if ('httpProxy' in body) {
+    const proxy = body.httpProxy
+    if (proxy !== null && typeof proxy !== 'string') return response.status(400).json({ error: 'httpProxy must be a string or null' })
+    const normalized = typeof proxy === 'string' && proxy.trim() ? normalizeProxyUrl(proxy) : undefined
+    if (typeof proxy === 'string' && proxy.trim() && !normalized) return response.status(400).json({ error: 'Enter a proxy URL such as http://127.0.0.1:7890' })
+    if (normalized) next.httpProxy = normalized
+    else delete next.httpProxy
+  }
+  providerSettings = next
+  writeProviderSettings(providerSettings)
+  // Claude reads the environment per run; Codex needs a fresh app-server.
+  claude.invalidate()
+  codexRestartPending = true
+  restartCodexWhenIdle()
+  const status = providerSettingsStatus(providerSettings)
+  broadcast({ type: 'provider_settings', settings: status })
+  return response.json({ ...status, restartPending: codexRestartPending })
+})
+
 app.get('/api/environment', async (_request, response) => {
   const [codexState, claudeState, nodeState, gitState] = await Promise.all([
     commandVersion('codex'), commandVersion('claude'), commandVersion('node'), commandVersion('git'),
   ])
   const tool = (id: EnvironmentTool, state: { installed: boolean; version?: string }) => ({ id, label: environmentTools[id].label, ...state, ...(environmentInstalls.get(id) ?? {}) })
-  return response.json({ tools: [tool('codex', codexState), tool('claude', claudeState)], requirements: [{ label: 'Node.js', ...nodeState }, { label: 'Git', ...gitState }] })
+  claude.invalidate()
+  const claudeReadiness = await claude.readiness().catch(() => undefined)
+  const claudeTool = { ...tool('claude', claudeState), ...(claudeReadiness ? { runtime: claudeReadiness.source, loggedIn: claudeReadiness.loggedIn, requiredVersion: claudeReadiness.requiredVersion, ...(claudeReadiness.account ? { account: claudeReadiness.account } : {}) } : {}) }
+  return response.json({ tools: [tool('codex', codexState), claudeTool], requirements: [{ label: 'Node.js', ...nodeState }, { label: 'Git', ...gitState }] })
 })
 
 app.post('/api/environment/:tool/install', (request, response) => {
@@ -712,19 +929,28 @@ app.post('/api/environment/:tool/install', (request, response) => {
   child.stderr.on('data', chunk => { output += String(chunk) })
   child.once('error', error => environmentInstalls.set(toolId, { status: 'failed', detail: error.message }))
   child.once('exit', code => {
-    if (code === 0) environmentInstalls.delete(toolId)
+    if (code === 0) { environmentInstalls.delete(toolId); if (toolId === 'claude') claude.invalidate() }
     else environmentInstalls.set(toolId, { status: 'failed', detail: output.trim().slice(-500) || `npm exited with code ${code ?? 'unknown'}` })
   })
   return response.status(202).json({ accepted: true, message: `Installing ${tool.label}…` })
 })
 
-app.get('/api/account/rate-limits', async (_request, response) => {
+app.get('/api/account/rate-limits', async (request, response) => {
+  if (request.query.agent === 'Claude') {
+    try { return response.json({ rateLimits: await claude.readRateLimits() }) }
+    catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Claude plan limits are unavailable' }) }
+  }
   try { return response.json(await codex.readRateLimits()) }
   catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Codex account limits are unavailable' }) }
 })
 
-app.get('/api/models', async (_request, response) => {
-  try { return response.json({ items: await codex.listModels() }) }
+app.get('/api/models', async (request, response) => {
+  if (request.query.agent === 'Claude') {
+    try { return response.json({ items: await claude.listModels() }) }
+    catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to load Claude models' }) }
+  }
+  const extraModels = providerSettingsStatus(providerSettings).deepseek.configured ? deepseekModels : []
+  try { return response.json({ items: [...await codex.listModels(), ...extraModels] }) }
   catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to load Codex models' }) }
 })
 
@@ -829,6 +1055,21 @@ app.post('/api/projects/:projectId/deleted-tasks/:sessionId/restore', async (req
   hydrateProjectCache(project)
   refreshCodexSessionCache()
   const sessionId = request.params.sessionId
+  const archivedClaudeIndex = deletedTasks.findIndex(item => item.task.agent === 'Claude' && item.task.projectId === project.id && (item.task.remoteSessionId === sessionId || item.task.id === sessionId))
+  if (archivedClaudeIndex >= 0) {
+    const archived = deletedTasks.splice(archivedClaudeIndex, 1)[0]
+    const restored = { ...archived.task, status: archived.task.status === 'running' || archived.task.status === 'waiting_for_approval' ? 'interrupted' as const : archived.task.status, executionStartedAt: undefined, activeTurnId: undefined, pendingApprovals: [] }
+    tasks.push(restored)
+    for (const event of archived.events) {
+      events.push(event)
+      eventSequences.set(event.taskId, Math.max(eventSequences.get(event.taskId) ?? 0, event.sequence))
+    }
+    for (const id of [restored.remoteSessionId, ...(restored.remoteSessionAliases ?? [])]) if (id) hiddenCodexSessionIds.delete(id)
+    persist(project.id)
+    broadcast({ type: 'task_restored', taskId: restored.id })
+    const { tokenUsage: _tokenUsage, ...publicTask } = restored
+    return response.json(publicTask)
+  }
   const codexTask = discoverCodexTasks(project.id, project.path).find(task => task.remoteSessionId === sessionId)
   if (!codexTask) return response.status(404).json({ error: 'Recoverable Codex session not found' })
   const existing = tasks.find(task => task.projectId === project.id && (task.remoteSessionId === sessionId || (task.remoteSessionAliases ?? []).includes(sessionId)))
@@ -916,6 +1157,18 @@ app.get('/api/tasks/:taskId/history', async (request, response) => {
   if (!task) return response.status(404).json({ error: 'Task not found' })
   if (!task.remoteSessionId) return response.json({ thread: null })
   const cursorValue = typeof request.query.before === 'string' ? request.query.before : undefined
+  if (task.agent === 'Claude') {
+    const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
+    try {
+      const items = (await claude.readHistory(task.remoteSessionId, projectPath)).map(item => item.role === 'user' ? { ...item, text: stripInjectedPromptContext(item.text) } : item)
+      const cursor = cursorValue?.match(/^thread:(\d+)$/)
+      const end = Math.min(cursor ? Number(cursor[1]) : items.length, items.length)
+      const start = Math.max(0, end - HISTORY_PAGE_SIZE)
+      return response.json({ items: items.slice(start, end), nextCursor: start > 0 ? `thread:${start}` : null, source: 'claude_session' })
+    } catch (error) {
+      return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to read Claude session history' })
+    }
+  }
   const fileCursor = cursorValue?.match(/^file:(\d+)$/)
   const threadCursor = cursorValue?.match(/^thread:(\d+)$/)
   if (fileCursor || !cursorValue) {
@@ -948,6 +1201,7 @@ app.get('/api/tasks/:taskId/history', async (request, response) => {
 app.get('/api/tasks/:taskId/usage', (request, response) => {
   const task = tasks.find(item => item.id === request.params.taskId)
   if (!task) return response.status(404).json({ error: 'Task not found' })
+  if (task.agent === 'Claude') return response.json({ tokenUsage: task.tokenUsage ?? null })
   if (!task.remoteSessionId) return response.json({ tokenUsage: null })
   return response.json({ tokenUsage: readCodexSessionTokenUsage(task.remoteSessionId) ?? null })
 })
@@ -955,19 +1209,22 @@ app.get('/api/tasks/:taskId/usage', (request, response) => {
 app.patch('/api/tasks/:taskId/model', (request, response) => {
   const task = tasks.find(item => item.id === request.params.taskId)
   if (!task) return response.status(404).json({ error: 'Task not found' })
-  if (task.agent !== 'Codex') return response.status(400).json({ error: 'Model selection is only supported for Codex tasks' })
   if (task.status === 'running' || task.status === 'waiting_for_approval') return response.status(409).json({ error: 'Interrupt or finish the current turn before changing its model' })
   const model = typeof request.body?.model === 'string' ? request.body.model.trim() : ''
   const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : ''
   if (!model || model.length > 200) return response.status(400).json({ error: 'A valid model is required' })
-  if (!reasoningEffort || reasoningEffort.length > 100) return response.status(400).json({ error: 'A valid reasoning level is required' })
+  if ((!reasoningEffort && task.agent !== 'Claude') || reasoningEffort.length > 100) return response.status(400).json({ error: 'A valid reasoning level is required' })
   task.model = model
-  task.reasoningEffort = reasoningEffort
+  task.reasoningEffort = reasoningEffort || undefined
   persist(task.projectId)
   return response.json(task)
 })
 
-app.post('/api/projects/:projectId/tasks', (request, response) => {
+const claudeUnavailableResponse = (response: express.Response, error: unknown) => error instanceof ClaudeUnavailableError
+  ? response.status(409).json({ error: error.message, code: error.code })
+  : response.status(503).json({ error: error instanceof Error ? error.message : 'Claude is unavailable' })
+
+app.post('/api/projects/:projectId/tasks', async (request, response) => {
   const project = projects.find(item => item.id === request.params.projectId)
   const title = typeof request.body?.title === 'string' ? stripInjectedPromptContext(request.body.title) : ''
   const model = typeof request.body?.model === 'string' ? request.body.model.trim() : undefined
@@ -975,23 +1232,28 @@ app.post('/api/projects/:projectId/tasks', (request, response) => {
   const agent: AgentName = request.body?.agent === 'Claude' ? 'Claude' : 'Codex'
   if (!project) return response.status(404).json({ error: 'Project not found' })
   if (!title) return response.status(400).json({ error: 'Task title is required' })
-  if (agent !== 'Codex') return response.status(501).json({ error: 'Claude provider is not implemented yet' })
+  if (agent === 'Claude') {
+    try { await claude.ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+  }
 
   const now = new Date().toISOString()
   const task = { id: `task-${randomUUID()}`, projectId: project.id, title, agent, ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}), status: 'running' as const, createdAt: now, lastActivityAt: now, executionStartedAt: now, executionDurationMs: 0 }
   tasks.unshift(task)
   appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'user_message', payload: { text: title }, sequence: 0, createdAt: now })
-  if (agent === 'Codex') startCodexTask(task, title, project.path)
+  startAgentTask(task, title, project.path)
   return response.status(201).json(task)
 })
 
-app.post('/api/tasks/:taskId/messages', (request, response) => {
+app.post('/api/tasks/:taskId/messages', async (request, response) => {
   const task = tasks.find(item => item.id === request.params.taskId)
   const message = typeof request.body?.message === 'string' ? stripInjectedPromptContext(request.body.message) : ''
   const model = typeof request.body?.model === 'string' ? request.body.model.trim() : undefined
   const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : undefined
   if (!task) return response.status(404).json({ error: 'Task not found' })
   if (!message) return response.status(400).json({ error: 'Message is required' })
+  if (task.agent === 'Claude' && !claude.isActive(task.id)) {
+    try { await claude.ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+  }
 
   const event: SessionEvent = { id: `event-${randomUUID()}`, taskId: task.id, type: 'user_message', payload: { text: message }, sequence: 0, createdAt: new Date().toISOString() }
   if (model) task.model = model
@@ -1004,7 +1266,11 @@ app.post('/api/tasks/:taskId/messages', (request, response) => {
     persist(task.projectId)
     broadcastTaskStatus(task)
   }
-  if (task.agent === 'Codex') {
+  if (task.agent === 'Claude') {
+    const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
+    // A message sent mid-turn joins the running Claude process as the next prompt.
+    if (!claude.push(task.id, message)) startClaudeTurn(task, message, projectPath)
+  } else if (task.agent === 'Codex') {
     const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
     activeCodexTasks.add(task.id)
     if (task.activeTurnId && task.remoteSessionId) {
@@ -1042,17 +1308,22 @@ app.post('/api/tasks/:taskId/approvals/:approvalId', (request, response) => {
 app.post('/api/tasks/:taskId/interrupt', (request, response) => {
   const task = tasks.find(item => item.id === request.params.taskId)
   if (!task) return response.status(404).json({ error: 'Task not found' })
-  if (!task.remoteSessionId || !task.activeTurnId) return response.status(409).json({ error: 'Task has no active Codex turn' })
+  const claudeTurn = task.agent === 'Claude' && claude.isActive(task.id)
+  if (!claudeTurn && (!task.remoteSessionId || !task.activeTurnId)) return response.status(409).json({ error: 'Task has no active turn' })
   for (const approval of task.pendingApprovals ?? []) {
     const pending = pendingApprovalRequests.get(approval.id)
     if (!pending) continue
-    try { codex.respondToServerRequest(pending.rpcId, makeApprovalResponse(pending.kind, 'decline', pending.requestedPermissions)) }
+    try {
+      if (pending.claude) pending.claude.resolve({ behavior: 'deny', message: claudeDeniedMessage, interrupt: true })
+      else if (pending.rpcId !== undefined) codex.respondToServerRequest(pending.rpcId, makeApprovalResponse(pending.kind, 'decline', pending.requestedPermissions))
+    }
     catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to decline pending approval' }) }
     pendingApprovalRequests.delete(approval.id)
   }
   task.pendingApprovals = []
   pauseTaskTimer(task)
-  void codex.interruptTurn(task.remoteSessionId, task.activeTurnId).catch(error => failTask(task, error))
+  if (claudeTurn) void claude.interrupt(task.id).catch(error => failTask(task, error))
+  else if (task.remoteSessionId && task.activeTurnId) void codex.interruptTurn(task.remoteSessionId, task.activeTurnId).catch(error => failTask(task, error))
   task.status = 'interrupted'
   task.activeTurnId = undefined
   task.lastActivityAt = new Date().toISOString()
@@ -1107,6 +1378,7 @@ const shutdown = () => {
     broadcastTaskStatus(task)
   }
   codex.stop()
+  claude.stopAll()
   server.close(() => process.exit(0))
 }
 process.once('SIGINT', shutdown)
