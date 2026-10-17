@@ -3,16 +3,16 @@
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/bobtthp/relay"
-  url "https://github.com/bobtthp/relay/releases/download/v0.1.15/relay-0.1.15.tar.gz"
-  sha256 "dda3811c51d141ea0593a8970814cb224e0ea5649d121f1218ef15446fae4862"
+  url "https://github.com/bobtthp/relay/releases/download/v0.2.0/relay-0.2.0.tar.gz"
+  sha256 "4bfde48bee1114981b85179fb0542dd5111fff8f2769b627edfab38100a19197"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/bobtthp/relay/releases/download/v0.1.15"
-    sha256 cellar: :any, arm64_tahoe:   "bd19cd2ec29c33e8e20d5f4d18e01dd465db09f35266ebd5ab10ce68e0e2f53b"
-    sha256 cellar: :any, arm64_sequoia: "08cc3d73af5ae9225dd3a7d5e6389b854a5e7b8bbf40bd0b952e85aea2079f7c"
-    sha256 cellar: :any, tahoe:         "d14a6665f8ace70a65c38e59b275b85491047d0492f0d2123694af4353bee67a"
-    sha256 cellar: :any, sequoia:       "de78551b721924a3cfccafa13151adc675042c65624f34f081bf93ed96641399"
+    root_url "https://github.com/bobtthp/relay/releases/download/v0.2.0"
+    sha256 cellar: :any, arm64_tahoe:   "b22a48ab14f9bcdcd27860060958d1d7bc278fd6648f4a6143a9d9caec2719a1"
+    sha256 cellar: :any, arm64_sequoia: "c971686c3a2526d3292d1d0849bb2c64659d8b7bde2936c77c15913744a5d7c6"
+    sha256 cellar: :any, tahoe:         "6ec14076d731d5773752d3362ce49f64c2aecd4324f065c591f53a349c47f93a"
+    sha256 cellar: :any, sequoia:       "e7131887c93161d68a431bd4aef5a93eb6d94b41173b4e5e8494f600190f8847"
   end
 
   depends_on "node@22"
@@ -20,6 +20,10 @@ class Relay < Formula
   def install
     system "npm", "ci", "--no-audit", "--fund=false"
     system "npm", "run", "build"
+    # Relay runs the user's own Claude Code, so drop the Agent SDK's bundled
+    # binary (~219MB) and the peer packages only its unused entry points load.
+    system "npm", "prune", "--omit=peer", "--no-audit", "--fund=false"
+    rm_r Dir["node_modules/@anthropic-ai/claude-agent-sdk-*"]
 
     libexec.install "dist-server", "node_modules"
     (libexec/"dist").install "dist/web"
