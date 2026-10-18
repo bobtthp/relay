@@ -133,6 +133,10 @@ class PromptQueue implements AsyncIterable<SDKUserMessage> {
     else this.items.push(message)
   }
 
+  /** Prompts pushed but not yet taken by the SDK. */
+  get pending() { return this.items.length }
+  get isClosed() { return this.closed }
+
   close() {
     this.closed = true
     if (this.waiting) { const resolve = this.waiting; this.waiting = undefined; resolve({ value: undefined, done: true }) }
@@ -156,7 +160,17 @@ const textFromToolResult = (content: unknown): string => {
   return content.map(part => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : '').filter(Boolean).join('\n')
 }
 
-type ActiveRun = { query: Query; prompts: PromptQueue; queued: number; interrupted: boolean; finished: boolean }
+type ActiveRun = {
+  query: Query
+  prompts: PromptQueue
+  interrupted: boolean
+  finished: boolean
+  sessionId?: string
+  /** Prompts that arrived after input was closed; they start the next run on the same session. */
+  followUps: string[]
+  /** Resolves once the Claude process has exited and onFinished was reported. */
+  done: Promise<void>
+}
 
 export class ClaudeRunner {
   /** The SDK's env option replaces the subprocess environment, so this returns a complete one. */
@@ -246,6 +260,9 @@ export class ClaudeRunner {
   isActive(taskId: string) { return this.runs.has(taskId) }
 
   async start(taskId: string, prompt: string, options: ClaudeTurnOptions, callbacks: ClaudeTurnCallbacks) {
+    // An interrupted run can take a moment to exit; let it finish before starting the next one.
+    const previous = this.runs.get(taskId)
+    if (previous?.interrupted) await Promise.race([previous.done, new Promise(resolve => setTimeout(resolve, 15_000))])
     if (this.runs.has(taskId)) throw new Error('Claude is already running this task')
     const executable = await this.executableOptions()
     if (this.runs.has(taskId)) throw new Error('Claude is already running this task')
@@ -273,13 +290,22 @@ export class ClaudeRunner {
         canUseTool: (toolName, input, context) => callbacks.requestPermission({ toolName, input, toolUseId: context.toolUseID, blockedPath: context.blockedPath, signal: context.signal }),
       },
     })
-    const run: ActiveRun = { query: claudeQuery, prompts, queued: 1, interrupted: false, finished: false }
+    let markDone = () => {}
+    const run: ActiveRun = { query: claudeQuery, prompts, interrupted: false, finished: false, sessionId: options.resume, followUps: [], done: new Promise(resolve => { markDone = resolve }) }
     this.runs.set(taskId, run)
     const finish = (status: 'completed' | 'interrupted' | 'failed', error?: string) => {
       if (run.finished) return
       run.finished = true
       this.runs.delete(taskId)
       prompts.close()
+      markDone()
+      if (status === 'completed' && run.followUps.length) {
+        // A message arrived while this run was closing: continue the same session
+        // without reporting the task as finished in between.
+        void this.start(taskId, run.followUps.join('\n\n'), { ...options, resume: run.sessionId ?? options.resume }, callbacks)
+          .catch(followUpError => callbacks.onFinished('failed', followUpError instanceof Error ? followUpError.message : String(followUpError)))
+        return
+      }
       callbacks.onFinished(status, error)
     }
     void this.consume(run, callbacks, finish)
@@ -290,9 +316,9 @@ export class ClaudeRunner {
   /** Delivers a follow-up prompt to an active run. Returns false when no run is active. */
   push(taskId: string, prompt: string) {
     const run = this.runs.get(taskId)
-    if (!run || run.finished) return false
-    run.queued += 1
-    run.prompts.push(prompt)
+    if (!run || run.finished || run.interrupted) return false
+    if (run.prompts.isClosed) run.followUps.push(prompt)
+    else run.prompts.push(prompt)
     return true
   }
 
@@ -376,6 +402,7 @@ export class ClaudeRunner {
     for await (const message of run.query as AsyncIterable<SDKMessage>) {
       if (!sessionReported && 'session_id' in message && typeof message.session_id === 'string' && message.session_id) {
         sessionReported = true
+        run.sessionId = message.session_id
         callbacks.onSessionId(message.session_id)
       }
       // Subagent traffic stays inside the subagent; Relay shows the main thread.
@@ -412,7 +439,6 @@ export class ClaudeRunner {
           outputTokens: usage.output_tokens ?? 0,
           totalTokens: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.output_tokens ?? 0),
         })
-        run.queued = Math.max(0, run.queued - 1)
         if (message.subtype !== 'success' && !run.interrupted) {
           finish('failed', message.errors.join('\n') || `Claude stopped: ${message.subtype}`)
           return
@@ -421,7 +447,11 @@ export class ClaudeRunner {
           finish('failed', message.result || 'Claude returned an error')
           return
         }
-        if (run.queued === 0) run.prompts.close()
+        // Claude Code may fold prompts pushed mid-turn into the current turn and
+        // report a single result, so counting results can wait forever. Once
+        // every pushed prompt has been taken, end input: Claude finishes what it
+        // already received and exits, which ends this run.
+        if (run.prompts.pending === 0) run.prompts.close()
       }
     }
   }

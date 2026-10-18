@@ -755,7 +755,12 @@ const describeClaudeTool = (toolName: string, input: Record<string, unknown>, co
   return { text: `${completed ? 'Finished' : 'Running'} ${toolName}${typeof target === 'string' && target ? `: ${target}` : ''}`, logType: 'tool' as const }
 }
 
+// The latest Claude run per task. A run that was interrupted can report its end
+// after the next one started; that stale report must not touch the task.
+const currentClaudeRuns = new Map<string, symbol>()
 const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath: string) => {
+  const runToken = Symbol(task.id)
+  currentClaudeRuns.set(task.id, runToken)
   activeCodexTasks.add(task.id)
   const tools = new Map<string, { name: string; input: Record<string, unknown> }>()
   const memory = readMemorySettings(projectPath).enabled ? { directory: memoryDirectory(projectPath), promptAppend: claudeMemoryPromptAppend } : undefined
@@ -807,6 +812,8 @@ const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath
       } : usage
     },
     onFinished: (status, error) => {
+      if (currentClaudeRuns.get(task.id) !== runToken) return
+      currentClaudeRuns.delete(task.id)
       if (status === 'failed') { forgetTaskApprovals(task); failTask(task, new Error(error ?? 'Claude turn failed')); return }
       const now = new Date()
       pauseTaskTimer(task, now)
