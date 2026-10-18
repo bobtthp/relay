@@ -824,6 +824,16 @@ const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath
       persist(task.projectId)
       broadcastTaskStatus(task)
     },
+    onBusy: () => {
+      // Claude picked the task up again by itself (a background command ended).
+      currentClaudeRuns.set(task.id, runToken)
+      activeCodexTasks.add(task.id)
+      if (task.status === 'running') return
+      resumeTaskTimer(task, new Date())
+      task.status = 'running'
+      persist(task.projectId)
+      broadcastTaskStatus(task)
+    },
     requestPermission: request => requestClaudePermission(task, projectPath, request),
   }).catch(error => failTask(task, error))
 }
@@ -1399,6 +1409,7 @@ app.delete('/api/tasks/:taskId', (request, response) => {
     return response.status(409).json({ error: 'Interrupt or finish this task before deleting it' })
   }
   for (const sessionId of [task.remoteSessionId, ...(task.remoteSessionAliases ?? [])]) if (sessionId) hiddenCodexSessionIds.add(sessionId)
+  claude.release(task.id)
   activeCodexTasks.delete(task.id)
   for (const [approvalId, pending] of pendingApprovalRequests) if (pending.taskId === task.id) pendingApprovalRequests.delete(approvalId)
   for (const sessionId of [task.remoteSessionId, ...(task.remoteSessionAliases ?? [])]) {
@@ -1506,6 +1517,7 @@ app.patch('/api/tasks/:taskId/agent', async (request, response) => {
   const incoming = sessions[agent]
   delete sessions[agent]
   const from = task.agent
+  if (from === 'Claude') claude.release(task.id)
   task.agent = agent
   task.agentSessions = sessions
   task.remoteSessionId = incoming?.sessionId
