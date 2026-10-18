@@ -1285,7 +1285,7 @@ function App() {
 
   return <div className={`app-shell reading-${readingSize}${taskMaximized ? ' task-maximized' : ''}${sidebarOpen ? '' : ' sidebar-collapsed'}`}>
     <header className="topbar">
-      <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span></div>
+      <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span><span className="brand-version">v{__RELAY_VERSION__}</span></div>
       <div className="topbar-center"><span className="connection-dot" /> {machineName} <ChevronDown size={14} /></div>
       {activeAgent === 'Claude'
         ? claudeRateLimit && <RateLimitStatus rateLimit={claudeRateLimit} agent="Claude" language={language} />
