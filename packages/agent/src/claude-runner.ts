@@ -34,6 +34,13 @@ const FIVE_HOURS = 300
 const SEVEN_DAYS = 7 * 24 * 60
 const RATE_LIMIT_CACHE_MS = 2 * 60 * 1_000
 
+export const claudeRateLimitCacheIsFresh = (cachedAt: number, limits: ClaudeRateLimits, now = Date.now()) => {
+  if (now - cachedAt >= RATE_LIMIT_CACHE_MS) return false
+  // A reset makes the utilization stale immediately, even when the cache was
+  // populated only moments before the boundary.
+  return [limits.primary, limits.secondary].every(window => !window || window.resetsAt * 1_000 > now)
+}
+
 /** From the /usage data: utilization 0-100, resets_at ISO 8601. */
 const windowFromUsage = (value: unknown, windowDurationMins: number): ClaudeRateLimitWindow | undefined => {
   const window = value as { utilization?: unknown; resets_at?: unknown } | null | undefined
@@ -212,7 +219,7 @@ export class ClaudeRunner {
    * rate_limit_event messages, so a future SDK change only loses idle refreshes.
    */
   async readRateLimits(): Promise<ClaudeRateLimits | null> {
-    if (this.rateLimitCache && Date.now() - this.rateLimitCache.at < RATE_LIMIT_CACHE_MS) return this.rateLimitCache.limits
+    if (this.rateLimitCache && claudeRateLimitCacheIsFresh(this.rateLimitCache.at, this.rateLimitCache.limits)) return this.rateLimitCache.limits
     const runtime = await this.resolveRuntime()
     if (runtime.source !== 'local' || !runtime.executable) return null
     const prompts = new PromptQueue()

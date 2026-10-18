@@ -774,6 +774,22 @@ function App() {
   }, [rateLimit])
 
   useEffect(() => {
+    if (!claudeRateLimit) return
+    const resetAt = [claudeRateLimit.primary, claudeRateLimit.secondary]
+      .filter((window): window is RateLimitWindow => Boolean(window && window.resetsAt * 1_000 > Date.now()))
+      .reduce((earliest, window) => Math.min(earliest, window.resetsAt * 1_000), Number.POSITIVE_INFINITY)
+    if (!Number.isFinite(resetAt)) return
+    const timer = window.setTimeout(() => {
+      void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
+        if (!response.ok) return
+        const body = await response.json() as { rateLimits?: RateLimits | null }
+        setClaudeRateLimit(body.rateLimits ?? null)
+      }).catch(() => undefined)
+    }, Math.max(0, resetAt - Date.now() + 500))
+    return () => window.clearTimeout(timer)
+  }, [claudeRateLimit])
+
+  useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const accessToken = getRelayAccessToken()
     const projectId = localProject?.id
