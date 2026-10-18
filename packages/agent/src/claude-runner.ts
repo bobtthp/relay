@@ -103,8 +103,10 @@ export type ClaudeTurnCallbacks = {
   onToolStarted: (toolUseId: string, toolName: string, input: Record<string, unknown>) => void
   onToolFinished: (toolUseId: string, output: string, isError: boolean) => void
   onUsage: (usage: TokenUsage) => void
-  /** Called once per run, after the last queued prompt finished or the run stopped. */
+  /** Called once per turn, after the last queued prompt finished or the turn stopped. */
   onFinished: (status: 'completed' | 'interrupted' | 'failed', error?: string) => void
+  /** Claude started another turn by itself after onFinished, e.g. when a background command ended. */
+  onBusy?: () => void
   requestPermission: (request: ClaudeToolRequest) => Promise<PermissionResult>
 }
 
@@ -160,16 +162,28 @@ const textFromToolResult = (content: unknown): string => {
   return content.map(part => part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : '').filter(Boolean).join('\n')
 }
 
+// A Claude process stays alive between turns, like an interactive session: it
+// cannot exit while background commands it started (dev servers and the like)
+// are still running, and the next prompt can reuse it. An idle process is
+// released after a while; one that still owns background commands then keeps
+// running on its own until they end.
+const IDLE_RELEASE_MS = 30 * 60 * 1_000
+
 type ActiveRun = {
   query: Query
   prompts: PromptQueue
-  interrupted: boolean
-  finished: boolean
+  /** Callbacks of the current (or last) turn. */
+  callbacks: ClaudeTurnCallbacks
+  /** Turns with the same options can reuse this process. */
+  key: string
   sessionId?: string
-  /** Prompts that arrived after input was closed; they start the next run on the same session. */
-  followUps: string[]
-  /** Resolves once the Claude process has exited and onFinished was reported. */
-  done: Promise<void>
+  /** A turn is in progress; false while the process waits for the next prompt. */
+  busy: boolean
+  interrupted: boolean
+  /** Resolves when the turn in progress ends. */
+  turnEnded: Promise<void>
+  endTurnSignal: () => void
+  idleTimer?: NodeJS.Timeout
 }
 
 export class ClaudeRunner {
@@ -177,6 +191,8 @@ export class ClaudeRunner {
   constructor(private readonly environment: () => NodeJS.ProcessEnv = () => process.env) {}
 
   private runs = new Map<string, ActiveRun>()
+  /** Released processes still running background commands. */
+  private released = new Set<Query>()
   private modelCache?: { at: number; models: ClaudeModel[] }
   private runtime?: Promise<ClaudeRuntime>
   private readinessCache?: { at: number; readiness: ClaudeReadiness }
@@ -257,13 +273,23 @@ export class ClaudeRunner {
     if (!readiness.loggedIn) throw new ClaudeUnavailableError('claude_login_required', 'Claude Code is not signed in. Run `claude` in a terminal on this Mac and sign in, then try again.')
   }
 
-  isActive(taskId: string) { return this.runs.has(taskId) }
+  /** A turn is in progress for this task. */
+  isActive(taskId: string) { return this.runs.get(taskId)?.busy === true }
 
   async start(taskId: string, prompt: string, options: ClaudeTurnOptions, callbacks: ClaudeTurnCallbacks) {
-    // An interrupted run can take a moment to exit; let it finish before starting the next one.
-    const previous = this.runs.get(taskId)
-    if (previous?.interrupted) await Promise.race([previous.done, new Promise(resolve => setTimeout(resolve, 15_000))])
-    if (this.runs.has(taskId)) throw new Error('Claude is already running this task')
+    const key = JSON.stringify([options.cwd, options.model, options.effort, options.memory, options.writableDirectories])
+    let previous = this.runs.get(taskId)
+    // An interrupted turn takes a moment to end; let it, then reuse the process.
+    if (previous?.busy && previous.interrupted) await Promise.race([previous.turnEnded, new Promise(resolve => setTimeout(resolve, 15_000))])
+    previous = this.runs.get(taskId)
+    if (previous?.busy && !previous.interrupted) throw new Error('Claude is already running this task')
+    if (previous && !previous.busy && previous.key === key && !previous.prompts.isClosed && (!options.resume || options.resume === previous.sessionId)) {
+      this.beginTurn(previous, callbacks)
+      previous.prompts.push(prompt)
+      return
+    }
+    // Different options, or an interrupt that never ended the turn: replace the process.
+    if (previous) this.release(taskId, { force: previous.busy })
     const executable = await this.executableOptions()
     if (this.runs.has(taskId)) throw new Error('Claude is already running this task')
     const prompts = new PromptQueue()
@@ -287,46 +313,67 @@ export class ClaudeRunner {
           // `//` marks an absolute path in permission rules; Edit rules also cover Write.
           ...(options.writableDirectories?.length ? { permissions: { allow: options.writableDirectories.map(directory => `Edit(/${directory}/**)`) } } : {}),
         } } : {}),
-        canUseTool: (toolName, input, context) => callbacks.requestPermission({ toolName, input, toolUseId: context.toolUseID, blockedPath: context.blockedPath, signal: context.signal }),
+        canUseTool: (toolName, input, context) => run.callbacks.requestPermission({ toolName, input, toolUseId: context.toolUseID, blockedPath: context.blockedPath, signal: context.signal }),
       },
     })
-    let markDone = () => {}
-    const run: ActiveRun = { query: claudeQuery, prompts, interrupted: false, finished: false, sessionId: options.resume, followUps: [], done: new Promise(resolve => { markDone = resolve }) }
+    const run: ActiveRun = { query: claudeQuery, prompts, callbacks, key, sessionId: options.resume, busy: false, interrupted: false, turnEnded: Promise.resolve(), endTurnSignal: () => {} }
+    this.beginTurn(run, callbacks)
     this.runs.set(taskId, run)
-    const finish = (status: 'completed' | 'interrupted' | 'failed', error?: string) => {
-      if (run.finished) return
-      run.finished = true
-      this.runs.delete(taskId)
-      prompts.close()
-      markDone()
-      if (status === 'completed' && run.followUps.length) {
-        // A message arrived while this run was closing: continue the same session
-        // without reporting the task as finished in between.
-        void this.start(taskId, run.followUps.join('\n\n'), { ...options, resume: run.sessionId ?? options.resume }, callbacks)
-          .catch(followUpError => callbacks.onFinished('failed', followUpError instanceof Error ? followUpError.message : String(followUpError)))
-        return
-      }
-      callbacks.onFinished(status, error)
-    }
-    void this.consume(run, callbacks, finish)
-      .then(() => finish(run.interrupted ? 'interrupted' : 'completed'))
-      .catch(error => finish(run.interrupted ? 'interrupted' : 'failed', error instanceof Error ? error.message : String(error)))
+    void this.consume(taskId, run)
+      .then(() => this.endTurn(run, run.interrupted ? 'interrupted' : 'completed'))
+      .catch(error => this.endTurn(run, run.interrupted ? 'interrupted' : 'failed', error instanceof Error ? error.message : String(error)))
+      .finally(() => {
+        if (this.runs.get(taskId) === run) this.runs.delete(taskId)
+        clearTimeout(run.idleTimer)
+        this.released.delete(claudeQuery)
+      })
   }
 
-  /** Delivers a follow-up prompt to an active run. Returns false when no run is active. */
+  private beginTurn(run: ActiveRun, callbacks: ClaudeTurnCallbacks) {
+    clearTimeout(run.idleTimer)
+    run.callbacks = callbacks
+    run.busy = true
+    run.interrupted = false
+    run.turnEnded = new Promise(resolve => { run.endTurnSignal = resolve })
+  }
+
+  private endTurn(run: ActiveRun, status: 'completed' | 'interrupted' | 'failed', error?: string) {
+    if (!run.busy) return
+    run.busy = false
+    run.endTurnSignal()
+    run.callbacks.onFinished(status, error)
+    clearTimeout(run.idleTimer)
+    run.idleTimer = setTimeout(() => { for (const [taskId, current] of this.runs) if (current === run && !run.busy) this.release(taskId) }, IDLE_RELEASE_MS)
+    run.idleTimer.unref()
+  }
+
+  /**
+   * Stops using the task's Claude process. Its input ends, so it exits once
+   * its background commands do; `force` stops it and them right away.
+   */
+  release(taskId: string, { force = false } = {}) {
+    const run = this.runs.get(taskId)
+    if (!run) return
+    this.runs.delete(taskId)
+    clearTimeout(run.idleTimer)
+    run.prompts.close()
+    if (force) run.query.close()
+    else this.released.add(run.query)
+  }
+
+  /** Delivers a prompt to the turn in progress. Returns false when no turn is in progress. */
   push(taskId: string, prompt: string) {
     const run = this.runs.get(taskId)
-    if (!run || run.finished || run.interrupted) return false
-    if (run.prompts.isClosed) run.followUps.push(prompt)
-    else run.prompts.push(prompt)
+    if (!run?.busy || run.interrupted || run.prompts.isClosed) return false
+    run.prompts.push(prompt)
     return true
   }
 
+  /** Stops the turn in progress; the process stays for the next prompt. */
   async interrupt(taskId: string) {
     const run = this.runs.get(taskId)
-    if (!run) return
+    if (!run?.busy) return
     run.interrupted = true
-    run.prompts.close()
     await run.query.interrupt()
   }
 
@@ -393,17 +440,21 @@ export class ClaudeRunner {
   }
 
   stopAll() {
-    for (const [taskId, run] of this.runs) { run.interrupted = true; run.prompts.close(); run.query.close(); this.runs.delete(taskId) }
+    for (const taskId of [...this.runs.keys()]) this.release(taskId, { force: true })
+    for (const releasedQuery of this.released) releasedQuery.close()
+    this.released.clear()
   }
 
-  private async consume(run: ActiveRun, callbacks: ClaudeTurnCallbacks, finish: (status: 'completed' | 'interrupted' | 'failed', error?: string) => void) {
+  private async consume(taskId: string, run: ActiveRun) {
     let messageId = ''
     let sessionReported = false
     for await (const message of run.query as AsyncIterable<SDKMessage>) {
-      if (!sessionReported && 'session_id' in message && typeof message.session_id === 'string' && message.session_id) {
+      // A released process may keep running background commands; nothing it says reaches the task.
+      const current = this.runs.get(taskId) === run
+      if (current && !sessionReported && 'session_id' in message && typeof message.session_id === 'string' && message.session_id) {
         sessionReported = true
         run.sessionId = message.session_id
-        callbacks.onSessionId(message.session_id)
+        run.callbacks.onSessionId(message.session_id)
       }
       // Subagent traffic stays inside the subagent; Relay shows the main thread.
       if ('parent_tool_use_id' in message && message.parent_tool_use_id) continue
@@ -417,6 +468,13 @@ export class ClaudeRunner {
           ?? (info.rateLimitType === 'seven_day' ? windowFromEvent(info, SEVEN_DAYS) : undefined) ?? previous?.secondary ?? null
         if (primary) this.storeRateLimits({ primary, secondary })
         continue
+      }
+      if (!current) continue
+      const callbacks = run.callbacks
+      if (!run.busy && (message.type === 'assistant' || (message.type === 'stream_event' && message.event.type === 'message_start'))) {
+        // Claude started a turn on its own, e.g. to report a background command that ended.
+        this.beginTurn(run, callbacks)
+        callbacks.onBusy?.()
       }
       if (message.type === 'stream_event') {
         const event = message.event
@@ -439,19 +497,13 @@ export class ClaudeRunner {
           outputTokens: usage.output_tokens ?? 0,
           totalTokens: (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.output_tokens ?? 0),
         })
-        if (message.subtype !== 'success' && !run.interrupted) {
-          finish('failed', message.errors.join('\n') || `Claude stopped: ${message.subtype}`)
-          return
-        }
-        if (message.subtype === 'success' && message.is_error && !run.interrupted) {
-          finish('failed', message.result || 'Claude returned an error')
-          return
-        }
+        if (run.interrupted) this.endTurn(run, 'interrupted')
+        else if (message.subtype !== 'success') this.endTurn(run, 'failed', message.errors.join('\n') || `Claude stopped: ${message.subtype}`)
+        else if (message.is_error) this.endTurn(run, 'failed', message.result || 'Claude returned an error')
         // Claude Code may fold prompts pushed mid-turn into the current turn and
-        // report a single result, so counting results can wait forever. Once
-        // every pushed prompt has been taken, end input: Claude finishes what it
-        // already received and exits, which ends this run.
-        if (run.prompts.pending === 0) run.prompts.close()
+        // report a single result, so the turn ends once every pushed prompt was
+        // taken. A prompt still queued starts the next turn in this process.
+        else if (run.prompts.pending === 0) this.endTurn(run, 'completed')
       }
     }
   }
