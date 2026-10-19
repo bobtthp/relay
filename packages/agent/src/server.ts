@@ -415,7 +415,8 @@ const formatCodexProgress = (item: Record<string, unknown>, completed: boolean) 
       : type === 'webSearch' ? (completed ? 'Finished web search' : 'Searching the web')
         : type === 'mcpToolCall' ? (completed ? 'Finished tool call' : 'Calling tool')
           : type === 'imageView' ? (completed ? 'Finished image inspection' : 'Inspecting image')
-            : ''
+            : type === 'contextCompaction' ? (completed ? 'Compacted context' : 'Compacting context')
+              : ''
   if (!action) return ''
   const detail = type === 'commandExecution' ? command
     : type === 'fileChange' ? paths.join(', ')
@@ -758,7 +759,7 @@ const describeClaudeTool = (toolName: string, input: Record<string, unknown>, co
 // The latest Claude run per task. A run that was interrupted can report its end
 // after the next one started; that stale report must not touch the task.
 const currentClaudeRuns = new Map<string, symbol>()
-const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath: string) => {
+const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath: string, { primer = true } = {}) => {
   const runToken = Symbol(task.id)
   currentClaudeRuns.set(task.id, runToken)
   activeCodexTasks.add(task.id)
@@ -769,7 +770,7 @@ const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath
     addMemoryTokens(task, 'injected', `${claudeMemoryPromptAppend}\n${readMemoryIndex(projectPath)}`)
     task.memorySession = memory.directory
   }
-  const turnPrompt = task.remoteSessionId ? withMemoryPrimer(task, projectPath, prompt) : prompt
+  const turnPrompt = task.remoteSessionId && primer ? withMemoryPrimer(task, projectPath, prompt) : prompt
   claude.start(task.id, turnPrompt, { cwd: projectPath, resume: task.remoteSessionId, model: task.model, effort: task.reasoningEffort, memory, writableDirectories }, {
     onSessionId: sessionId => {
       if (task.remoteSessionId === sessionId) return
@@ -811,6 +812,14 @@ const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath
         totalTokens: previous.totalTokens + usage.totalTokens,
       } : usage
     },
+    onCompacted: (preTokens, postTokens) => appendEvent({
+      id: `event-${randomUUID()}`,
+      taskId: task.id,
+      type: 'assistant_message',
+      payload: { text: `Compacted context: ~${preTokens.toLocaleString('en-US')}${postTokens ? ` → ~${postTokens.toLocaleString('en-US')}` : ''} tokens`, method: 'relay/progress', progressState: 'completed', logType: 'status', itemId: `compact-${randomUUID()}` },
+      sequence: 0,
+      createdAt: new Date().toISOString(),
+    }),
     onFinished: (status, error) => {
       if (currentClaudeRuns.get(task.id) !== runToken) return
       currentClaudeRuns.delete(task.id)
@@ -1597,6 +1606,37 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
     } else startCodexTask(task, prepareAgentPrompt(task, projectPath, message, event.id), projectPath)
   }
   return response.status(202).json({ accepted: true, event })
+})
+
+/**
+ * Summarizes the task's conversation so later turns read less context. Nothing
+ * is prepended: Claude Code only recognizes /compact at the start of a prompt,
+ * and a pending handoff stays pending for the next real message.
+ */
+app.post('/api/tasks/:taskId/compact', async (request, response) => {
+  const task = tasks.find(item => item.id === request.params.taskId)
+  if (!task) return response.status(404).json({ error: 'Task not found' })
+  if (task.status === 'running' || task.status === 'waiting_for_approval') return response.status(409).json({ error: 'Wait for the current turn to finish before compacting' })
+  if (!task.remoteSessionId) return response.status(409).json({ error: 'This task has no conversation to compact yet' })
+  if (task.agent === 'Claude') {
+    try { await claude.ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+  }
+  const projectPath = projectPathOf(task) ?? process.cwd()
+  const now = new Date()
+  resumeTaskTimer(task, now)
+  task.status = 'running'
+  task.lastActivityAt = now.toISOString()
+  persist(task.projectId)
+  broadcastTaskStatus(task)
+  if (task.agent === 'Claude') startClaudeTurn(task, '/compact', projectPath, { primer: false })
+  else {
+    const threadId = task.remoteSessionId
+    activeCodexTasks.add(task.id)
+    void codex.resumeThread(threadId, projectPath, codexThreadOptions(task, projectPath))
+      .then(() => { rememberModelProvider(task); return codex.compactThread(threadId) })
+      .catch(error => failTask(task, error))
+  }
+  return response.status(202).json({ accepted: true })
 })
 
 app.post('/api/tasks/:taskId/approvals/:approvalId', (request, response) => {

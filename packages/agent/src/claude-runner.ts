@@ -114,6 +114,8 @@ export type ClaudeTurnCallbacks = {
   onFinished: (status: 'completed' | 'interrupted' | 'failed', error?: string) => void
   /** Claude started another turn by itself after onFinished, e.g. when a background command ended. */
   onBusy?: () => void
+  /** Claude summarized the conversation, after /compact or on its own. */
+  onCompacted?: (preTokens: number, postTokens?: number) => void
   requestPermission: (request: ClaudeToolRequest) => Promise<PermissionResult>
 }
 
@@ -491,6 +493,8 @@ export class ClaudeRunner {
         for (const block of message.message.content) {
           if (block.type === 'tool_use') callbacks.onToolStarted(block.id, block.name, (block.input ?? {}) as Record<string, unknown>)
         }
+      } else if (message.type === 'system' && message.subtype === 'compact_boundary') {
+        callbacks.onCompacted?.(message.compact_metadata.pre_tokens, message.compact_metadata.post_tokens)
       } else if (message.type === 'user') {
         const content = message.message.content
         if (Array.isArray(content)) for (const block of content) {
