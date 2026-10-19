@@ -363,6 +363,10 @@ function App() {
   const [rateLimit, setRateLimit] = useState<RateLimits | null>(null)
   const [claudeRateLimit, setClaudeRateLimit] = useState<RateLimits | null>(null)
   const [rateLimitsByLimitId, setRateLimitsByLimitId] = useState<Record<string, RateLimits>>({})
+  // 'pending' means another load was requested mid-flight and must rerun, so a
+  // reset-triggered refresh is not swallowed by an in-flight pre-reset poll.
+  const codexRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
+  const claudeRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
   const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {}, switchAgent: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
@@ -733,26 +737,52 @@ function App() {
     }
   }, [])
 
-  useEffect(() => {
-    const loadRateLimit = () => {
-      void authenticatedFetch('/api/account/rate-limits').then(async response => {
-        const body = await response.json() as RateLimitResponse
-        if (!response.ok) return
-        const limitsById = body.rateLimitsByLimitId ?? {}
-        setRateLimitsByLimitId(limitsById)
-        setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
-      }).catch(() => undefined)
-      // The backend caches Claude's plan windows, so polling here stays cheap.
-      void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
-        if (!response.ok) return
-        const body = await response.json() as { rateLimits?: RateLimits | null }
-        setClaudeRateLimit(body.rateLimits ?? null)
-      }).catch(() => undefined)
+  const loadCodexRateLimit = useCallback(() => {
+    if (codexRateLimitLoading.current) {
+      codexRateLimitLoading.current = 'pending'
+      return
     }
-    loadRateLimit()
-    const refresh = window.setInterval(loadRateLimit, 30_000)
-    return () => window.clearInterval(refresh)
+    codexRateLimitLoading.current = 'running'
+    void authenticatedFetch('/api/account/rate-limits').then(async response => {
+      const body = await response.json() as RateLimitResponse
+      if (!response.ok) return
+      const limitsById = body.rateLimitsByLimitId ?? {}
+      setRateLimitsByLimitId(limitsById)
+      setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
+    }).catch(() => undefined).finally(() => {
+      const rerun = codexRateLimitLoading.current === 'pending'
+      codexRateLimitLoading.current = false
+      if (rerun) loadCodexRateLimit()
+    })
   }, [])
+
+  const loadClaudeRateLimit = useCallback(() => {
+    if (claudeRateLimitLoading.current) {
+      claudeRateLimitLoading.current = 'pending'
+      return
+    }
+    claudeRateLimitLoading.current = 'running'
+    void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
+      if (!response.ok) return
+      const body = await response.json() as { rateLimits?: RateLimits | null }
+      setClaudeRateLimit(body.rateLimits ?? null)
+    }).catch(() => undefined).finally(() => {
+      const rerun = claudeRateLimitLoading.current === 'pending'
+      claudeRateLimitLoading.current = false
+      if (rerun) loadClaudeRateLimit()
+    })
+  }, [])
+
+  useEffect(() => {
+    const loadRateLimits = () => {
+      loadCodexRateLimit()
+      // The backend caches Claude's plan windows, so polling here stays cheap.
+      loadClaudeRateLimit()
+    }
+    loadRateLimits()
+    const refresh = window.setInterval(loadRateLimits, 30_000)
+    return () => window.clearInterval(refresh)
+  }, [loadClaudeRateLimit, loadCodexRateLimit])
 
   useEffect(() => {
     if (!rateLimit) return
@@ -762,16 +792,10 @@ function App() {
     if (!Number.isFinite(resetAt)) return
     const timer = window.setTimeout(() => {
       playCompletionTone('quota-reset')
-      void authenticatedFetch('/api/account/rate-limits').then(async response => {
-        if (!response.ok) return
-        const body = await response.json() as RateLimitResponse
-        const limitsById = body.rateLimitsByLimitId ?? {}
-        setRateLimitsByLimitId(limitsById)
-        setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
-      }).catch(() => undefined)
+      loadCodexRateLimit()
     }, Math.max(0, resetAt - Date.now() + 500))
     return () => window.clearTimeout(timer)
-  }, [rateLimit])
+  }, [loadCodexRateLimit, rateLimit])
 
   useEffect(() => {
     if (!claudeRateLimit) return
@@ -780,14 +804,10 @@ function App() {
       .reduce((earliest, window) => Math.min(earliest, window.resetsAt * 1_000), Number.POSITIVE_INFINITY)
     if (!Number.isFinite(resetAt)) return
     const timer = window.setTimeout(() => {
-      void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
-        if (!response.ok) return
-        const body = await response.json() as { rateLimits?: RateLimits | null }
-        setClaudeRateLimit(body.rateLimits ?? null)
-      }).catch(() => undefined)
+      loadClaudeRateLimit()
     }, Math.max(0, resetAt - Date.now() + 500))
     return () => window.clearTimeout(timer)
-  }, [claudeRateLimit])
+  }, [claudeRateLimit, loadClaudeRateLimit])
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -1078,6 +1098,8 @@ function App() {
   const switchAgent = (agent: AgentName) => {
     const task = tasks[activeTask]
     if (!task?.id || task.agent === agent) return
+    if (agent === 'Claude' && !claudeRateLimit) loadClaudeRateLimit()
+    if (agent === 'Codex' && !rateLimit) loadCodexRateLimit()
     const model = agent === 'Claude' ? claudeModel : selectedModel
     const effort = agent === 'Claude' ? claudeEffort : selectedEffort
     void apiAgentService.switchAgent(task, agent, model || undefined, effort || undefined).then(updated => {
