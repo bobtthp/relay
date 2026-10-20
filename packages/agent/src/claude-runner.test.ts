@@ -18,3 +18,10 @@ test('Claude rate-limit cache still expires by age before a quota reset', () => 
   const now = 2_000_000
   assert.equal(claudeRateLimitCacheIsFresh(now - 120_000, limits((now + 60_000) / 1_000, (now + 120_000) / 1_000), now), false)
 })
+
+test('Claude rate-limit cache keeps a window that has not started until it ages out', () => {
+  const now = 2_000_000
+  const idle: ClaudeRateLimits = { primary: { usedPercent: 0, windowDurationMins: 300 }, secondary: { usedPercent: 25, windowDurationMins: 10_080, resetsAt: (now + 120_000) / 1_000 } }
+  assert.equal(claudeRateLimitCacheIsFresh(now - 1_000, idle, now), true)
+  assert.equal(claudeRateLimitCacheIsFresh(now - 120_000, idle, now), false)
+})

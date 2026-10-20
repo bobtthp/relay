@@ -18,9 +18,10 @@ const copy = {
   zh: { workspace: '工作区', connected: '已连接', overview: '概览', projects: '项目', activity: '活动', workspaces: 'WORKSPACES', recentTasks: '最近任务', projectActivity: '项目动态', newTask: '新建任务', searchTasks: '搜索任务', running: '执行中', completed: '已完成', readingSize: '阅读字号', language: '语言', completionSound: '完成提示音', autoApproval: '自动批准可自动处理的请求', autoApprovalHelp: '自动允许命令、可审阅的文件修改和仅本轮权限。', autoAcceptDefaultForms: '自动接受有默认值的表单', autoAcceptDefaultFormsHelp: '仅当所有必填项都有有效默认值时自动提交 MCP 表单；外链和 Codex 提问仍需你处理。', soundEnabled: '任务完成时播放', quotaResetSoundEnabled: '额度重置时播放', soundStyle: '音效', chimeSound: '清脆', bellSound: '铃声', digitalSound: '电子音', volume: '音量', previewSound: '试听提示音', task: '任务', agent: 'Agent', startTask: '新建任务', cancel: '取消', ask: '向', sendHint: 'Enter 换行 · Shift + Enter 发送', liveOutput: '实时输出', selectedTask: '当前任务' },
 } as const
 
-type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt: number }
+/** No resetsAt: the window has not started yet (Claude, right after a reset). */
+type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt?: number }
 type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null; normalModelSlug?: string }
-const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && limit.resetsAt * 1_000 > Date.now()))
+const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && (limit.resetsAt ?? 0) * 1_000 > Date.now()))
 type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
 const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
 const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
@@ -179,11 +180,11 @@ const RateLimitStatus = memo(function RateLimitStatus({ rateLimit, agent, langua
   }
   const renderWindow = (label: string, window: RateLimitWindow) => {
     const remaining = Math.round(Math.max(0, 100 - window.usedPercent))
-    const resetAt = new Date(window.resetsAt * 1_000).toLocaleString()
-    return <span className="quota-window" key={label} title={`${agent} ${label} quota: ${window.usedPercent}% used, ${remaining}% remaining. Resets at ${resetAt}.`}>
+    const resetAt = window.resetsAt ? `Resets at ${new Date(window.resetsAt * 1_000).toLocaleString()}.` : 'The window starts with the next request.'
+    return <span className="quota-window" key={label} title={`${agent} ${label} quota: ${window.usedPercent}% used, ${remaining}% remaining. ${resetAt}`}>
       <span className="quota-window-label">{label}</span><strong>{remaining}%</strong><span className="quota-window-remaining">{language === 'zh' ? '剩余' : 'left'}</span>
       <i className="quota-bar"><b style={{ width: `${Math.min(100, Math.max(0, window.usedPercent))}%` }} /></i>
-      <small>↻ {formatCountdown(window.resetsAt)}</small>
+      <small>{window.resetsAt ? `↻ ${formatCountdown(window.resetsAt)}` : language === 'zh' ? '未开始' : 'not started'}</small>
     </span>
   }
   return <div className="topbar-token"><span className="quota-agent">{agent}</span>{renderWindow('5h', rateLimit.primary)}{rateLimit.secondary && renderWindow('7d', rateLimit.secondary)}</div>
@@ -787,8 +788,8 @@ function App() {
   useEffect(() => {
     if (!rateLimit) return
     const resetAt = [rateLimit.primary, rateLimit.secondary]
-      .filter((window): window is RateLimitWindow => Boolean(window && window.usedPercent >= 100 && window.resetsAt * 1_000 > Date.now()))
-      .reduce((earliest, window) => Math.min(earliest, window.resetsAt * 1_000), Number.POSITIVE_INFINITY)
+      .filter((window): window is RateLimitWindow => Boolean(window && window.usedPercent >= 100 && (window.resetsAt ?? 0) * 1_000 > Date.now()))
+      .reduce((earliest, window) => Math.min(earliest, (window.resetsAt ?? 0) * 1_000), Number.POSITIVE_INFINITY)
     if (!Number.isFinite(resetAt)) return
     const timer = window.setTimeout(() => {
       playCompletionTone('quota-reset')
@@ -800,8 +801,8 @@ function App() {
   useEffect(() => {
     if (!claudeRateLimit) return
     const resetAt = [claudeRateLimit.primary, claudeRateLimit.secondary]
-      .filter((window): window is RateLimitWindow => Boolean(window && window.resetsAt * 1_000 > Date.now()))
-      .reduce((earliest, window) => Math.min(earliest, window.resetsAt * 1_000), Number.POSITIVE_INFINITY)
+      .filter((window): window is RateLimitWindow => Boolean(window && (window.resetsAt ?? 0) * 1_000 > Date.now()))
+      .reduce((earliest, window) => Math.min(earliest, (window.resetsAt ?? 0) * 1_000), Number.POSITIVE_INFINITY)
     if (!Number.isFinite(resetAt)) return
     const timer = window.setTimeout(() => {
       loadClaudeRateLimit()

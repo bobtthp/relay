@@ -27,7 +27,8 @@ export type ClaudeRuntime = {
 export type ClaudeReadiness = ClaudeRuntime & { loggedIn: boolean; account?: string }
 
 /** Same shape as Codex's account/rateLimits windows so the UI renders both alike. */
-export type ClaudeRateLimitWindow = { usedPercent: number; windowDurationMins: number; resetsAt: number }
+/** No resetsAt: the window has not started; Claude starts it with the next request. */
+export type ClaudeRateLimitWindow = { usedPercent: number; windowDurationMins: number; resetsAt?: number }
 export type ClaudeRateLimits = { primary: ClaudeRateLimitWindow; secondary?: ClaudeRateLimitWindow | null }
 
 const FIVE_HOURS = 300
@@ -38,7 +39,7 @@ export const claudeRateLimitCacheIsFresh = (cachedAt: number, limits: ClaudeRate
   if (now - cachedAt >= RATE_LIMIT_CACHE_MS) return false
   // A reset makes the utilization stale immediately, even when the cache was
   // populated only moments before the boundary.
-  return [limits.primary, limits.secondary].every(window => !window || window.resetsAt * 1_000 > now)
+  return [limits.primary, limits.secondary].every(window => !window?.resetsAt || window.resetsAt * 1_000 > now)
 }
 
 /** From the /usage data: utilization 0-100, resets_at ISO 8601. */
@@ -230,9 +231,11 @@ export class ClaudeRunner {
       const readUsage = (probe as Partial<Pick<Query, 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET'>>).usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
       if (typeof readUsage !== 'function') return this.rateLimitCache?.limits ?? null
       const usage = await readUsage.call(probe, { skipBehaviors: true })
-      const primary = windowFromUsage(usage.rate_limits?.five_hour, FIVE_HOURS)
-      if (!usage.rate_limits_available || !primary) return null
-      const limits = { primary, secondary: windowFromUsage(usage.rate_limits?.seven_day, SEVEN_DAYS) ?? null }
+      if (!usage.rate_limits_available) return null
+      // After a reset nothing is reported until the next request opens a new
+      // window; show it as unused instead of hiding the quota altogether.
+      const primary = windowFromUsage(usage.rate_limits?.five_hour, FIVE_HOURS) ?? { usedPercent: 0, windowDurationMins: FIVE_HOURS }
+      const limits = { primary, secondary: windowFromUsage(usage.rate_limits?.seven_day, SEVEN_DAYS) ?? { usedPercent: 0, windowDurationMins: SEVEN_DAYS } }
       this.storeRateLimits(limits)
       return limits
     } catch {
