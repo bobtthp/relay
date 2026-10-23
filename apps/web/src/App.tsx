@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import {
   Archive, Brain, Check, ChevronDown, ChevronRight, Copy,
   Code2, FolderGit2, Laptop, Menu, MessageSquare, MoreHorizontal,
-  Maximize2, Minimize2, Plus, Search, Settings, Sparkles, Square, TerminalSquare, Trash2, X, Zap,
+  Maximize2, Minimize2, Plus, Search, Settings, Shrink, Sparkles, Square, TerminalSquare, Trash2, X, Zap,
 } from 'lucide-react'
 import { MemoryPanel } from './MemoryPanel'
 import { AgentRequestError, apiAgentService, getTaskTokenUsage, listClaudeModels, listCodexModels, listTaskEvents, listTaskHistory, type CodexModel } from './services/apiAgentService'
@@ -18,9 +18,10 @@ const copy = {
   zh: { workspace: '工作区', connected: '已连接', overview: '概览', projects: '项目', activity: '活动', workspaces: 'WORKSPACES', recentTasks: '最近任务', projectActivity: '项目动态', newTask: '新建任务', searchTasks: '搜索任务', running: '执行中', completed: '已完成', readingSize: '阅读字号', language: '语言', completionSound: '完成提示音', autoApproval: '自动批准可自动处理的请求', autoApprovalHelp: '自动允许命令、可审阅的文件修改和仅本轮权限。', autoAcceptDefaultForms: '自动接受有默认值的表单', autoAcceptDefaultFormsHelp: '仅当所有必填项都有有效默认值时自动提交 MCP 表单；外链和 Codex 提问仍需你处理。', soundEnabled: '任务完成时播放', quotaResetSoundEnabled: '额度重置时播放', soundStyle: '音效', chimeSound: '清脆', bellSound: '铃声', digitalSound: '电子音', volume: '音量', previewSound: '试听提示音', task: '任务', agent: 'Agent', startTask: '新建任务', cancel: '取消', ask: '向', sendHint: 'Enter 换行 · Shift + Enter 发送', liveOutput: '实时输出', selectedTask: '当前任务' },
 } as const
 
-type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt: number }
+/** No resetsAt: the window has not started yet (Claude, right after a reset). */
+type RateLimitWindow = { usedPercent: number; windowDurationMins?: number; resetsAt?: number }
 type RateLimits = { primary: RateLimitWindow; secondary?: RateLimitWindow | null; normalModelSlug?: string }
-const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && limit.resetsAt * 1_000 > Date.now()))
+const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limits.primary, limits.secondary].some(limit => limit && limit.usedPercent >= 100 && (limit.resetsAt ?? 0) * 1_000 > Date.now()))
 type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
 const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
 const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
@@ -179,11 +180,11 @@ const RateLimitStatus = memo(function RateLimitStatus({ rateLimit, agent, langua
   }
   const renderWindow = (label: string, window: RateLimitWindow) => {
     const remaining = Math.round(Math.max(0, 100 - window.usedPercent))
-    const resetAt = new Date(window.resetsAt * 1_000).toLocaleString()
-    return <span className="quota-window" key={label} title={`${agent} ${label} quota: ${window.usedPercent}% used, ${remaining}% remaining. Resets at ${resetAt}.`}>
+    const resetAt = window.resetsAt ? `Resets at ${new Date(window.resetsAt * 1_000).toLocaleString()}.` : 'The window starts with the next request.'
+    return <span className="quota-window" key={label} title={`${agent} ${label} quota: ${window.usedPercent}% used, ${remaining}% remaining. ${resetAt}`}>
       <span className="quota-window-label">{label}</span><strong>{remaining}%</strong><span className="quota-window-remaining">{language === 'zh' ? '剩余' : 'left'}</span>
       <i className="quota-bar"><b style={{ width: `${Math.min(100, Math.max(0, window.usedPercent))}%` }} /></i>
-      <small>↻ {formatCountdown(window.resetsAt)}</small>
+      <small>{window.resetsAt ? `↻ ${formatCountdown(window.resetsAt)}` : language === 'zh' ? '未开始' : 'not started'}</small>
     </span>
   }
   return <div className="topbar-token"><span className="quota-agent">{agent}</span>{renderWindow('5h', rateLimit.primary)}{rateLimit.secondary && renderWindow('7d', rateLimit.secondary)}</div>
@@ -363,6 +364,10 @@ function App() {
   const [rateLimit, setRateLimit] = useState<RateLimits | null>(null)
   const [claudeRateLimit, setClaudeRateLimit] = useState<RateLimits | null>(null)
   const [rateLimitsByLimitId, setRateLimitsByLimitId] = useState<Record<string, RateLimits>>({})
+  // 'pending' means another load was requested mid-flight and must rerun, so a
+  // reset-triggered refresh is not swallowed by an in-flight pre-reset poll.
+  const codexRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
+  const claudeRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
   const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {}, switchAgent: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
@@ -733,45 +738,77 @@ function App() {
     }
   }, [])
 
-  useEffect(() => {
-    const loadRateLimit = () => {
-      void authenticatedFetch('/api/account/rate-limits').then(async response => {
-        const body = await response.json() as RateLimitResponse
-        if (!response.ok) return
-        const limitsById = body.rateLimitsByLimitId ?? {}
-        setRateLimitsByLimitId(limitsById)
-        setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
-      }).catch(() => undefined)
-      // The backend caches Claude's plan windows, so polling here stays cheap.
-      void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
-        if (!response.ok) return
-        const body = await response.json() as { rateLimits?: RateLimits | null }
-        setClaudeRateLimit(body.rateLimits ?? null)
-      }).catch(() => undefined)
+  const loadCodexRateLimit = useCallback(() => {
+    if (codexRateLimitLoading.current) {
+      codexRateLimitLoading.current = 'pending'
+      return
     }
-    loadRateLimit()
-    const refresh = window.setInterval(loadRateLimit, 30_000)
-    return () => window.clearInterval(refresh)
+    codexRateLimitLoading.current = 'running'
+    void authenticatedFetch('/api/account/rate-limits').then(async response => {
+      const body = await response.json() as RateLimitResponse
+      if (!response.ok) return
+      const limitsById = body.rateLimitsByLimitId ?? {}
+      setRateLimitsByLimitId(limitsById)
+      setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
+    }).catch(() => undefined).finally(() => {
+      const rerun = codexRateLimitLoading.current === 'pending'
+      codexRateLimitLoading.current = false
+      if (rerun) loadCodexRateLimit()
+    })
   }, [])
+
+  const loadClaudeRateLimit = useCallback(() => {
+    if (claudeRateLimitLoading.current) {
+      claudeRateLimitLoading.current = 'pending'
+      return
+    }
+    claudeRateLimitLoading.current = 'running'
+    void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
+      if (!response.ok) return
+      const body = await response.json() as { rateLimits?: RateLimits | null }
+      setClaudeRateLimit(body.rateLimits ?? null)
+    }).catch(() => undefined).finally(() => {
+      const rerun = claudeRateLimitLoading.current === 'pending'
+      claudeRateLimitLoading.current = false
+      if (rerun) loadClaudeRateLimit()
+    })
+  }, [])
+
+  useEffect(() => {
+    const loadRateLimits = () => {
+      loadCodexRateLimit()
+      // The backend caches Claude's plan windows, so polling here stays cheap.
+      loadClaudeRateLimit()
+    }
+    loadRateLimits()
+    const refresh = window.setInterval(loadRateLimits, 30_000)
+    return () => window.clearInterval(refresh)
+  }, [loadClaudeRateLimit, loadCodexRateLimit])
 
   useEffect(() => {
     if (!rateLimit) return
     const resetAt = [rateLimit.primary, rateLimit.secondary]
-      .filter((window): window is RateLimitWindow => Boolean(window && window.usedPercent >= 100 && window.resetsAt * 1_000 > Date.now()))
-      .reduce((earliest, window) => Math.min(earliest, window.resetsAt * 1_000), Number.POSITIVE_INFINITY)
+      .filter((window): window is RateLimitWindow => Boolean(window && window.usedPercent >= 100 && (window.resetsAt ?? 0) * 1_000 > Date.now()))
+      .reduce((earliest, window) => Math.min(earliest, (window.resetsAt ?? 0) * 1_000), Number.POSITIVE_INFINITY)
     if (!Number.isFinite(resetAt)) return
     const timer = window.setTimeout(() => {
       playCompletionTone('quota-reset')
-      void authenticatedFetch('/api/account/rate-limits').then(async response => {
-        if (!response.ok) return
-        const body = await response.json() as RateLimitResponse
-        const limitsById = body.rateLimitsByLimitId ?? {}
-        setRateLimitsByLimitId(limitsById)
-        setRateLimit(limitsById.codex ?? body.rateLimits ?? null)
-      }).catch(() => undefined)
+      loadCodexRateLimit()
     }, Math.max(0, resetAt - Date.now() + 500))
     return () => window.clearTimeout(timer)
-  }, [rateLimit])
+  }, [loadCodexRateLimit, rateLimit])
+
+  useEffect(() => {
+    if (!claudeRateLimit) return
+    const resetAt = [claudeRateLimit.primary, claudeRateLimit.secondary]
+      .filter((window): window is RateLimitWindow => Boolean(window && (window.resetsAt ?? 0) * 1_000 > Date.now()))
+      .reduce((earliest, window) => Math.min(earliest, (window.resetsAt ?? 0) * 1_000), Number.POSITIVE_INFINITY)
+    if (!Number.isFinite(resetAt)) return
+    const timer = window.setTimeout(() => {
+      loadClaudeRateLimit()
+    }, Math.max(0, resetAt - Date.now() + 500))
+    return () => window.clearTimeout(timer)
+  }, [claudeRateLimit, loadClaudeRateLimit])
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -969,6 +1006,13 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to send message'))
   }
 
+  const compactTask = (task: Task) => {
+    void apiAgentService.compactTask(task).then(() => {
+      setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
+      notify(language === 'zh' ? '正在压缩上下文，完成后继续发送消息即可' : 'Compacting context. Send a message once it finishes.')
+    }).catch(error => notify(error instanceof Error ? error.message : 'Unable to compact context'))
+  }
+
   const interruptTask = (task: Task) => {
     void apiAgentService.interruptTask(task).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'interrupted' } : item))
@@ -1062,6 +1106,8 @@ function App() {
   const switchAgent = (agent: AgentName) => {
     const task = tasks[activeTask]
     if (!task?.id || task.agent === agent) return
+    if (agent === 'Claude' && !claudeRateLimit) loadClaudeRateLimit()
+    if (agent === 'Codex' && !rateLimit) loadCodexRateLimit()
     const model = agent === 'Claude' ? claudeModel : selectedModel
     const effort = agent === 'Claude' ? claudeEffort : selectedEffort
     void apiAgentService.switchAgent(task, agent, model || undefined, effort || undefined).then(updated => {
@@ -1313,7 +1359,7 @@ function App() {
         <div className="task-preview-workspace" ref={executionWorkspaceRef}>
             {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={collapseExecutionLogs} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={collapseExecutionLogs} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
             <div className="task-preview">
-            <div className="preview-top"><div className="preview-title"><span className="eyebrow">{text.selectedTask}</span><div className="preview-task-heading">{taskMaximized && <span className="maximized-project-name" title={localProject?.name ?? 'Local project'}>{localProject?.name ?? 'Local project'}</span>}<h3 title={tasks[activeTask].title}>{truncateTaskTitle(tasks[activeTask].title)}</h3></div></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={toggleTaskMaximized} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
+            <div className="preview-top"><div className="preview-title"><span className="eyebrow">{text.selectedTask}</span><div className="preview-task-heading">{taskMaximized && <span className="maximized-project-name" title={localProject?.name ?? 'Local project'}>{localProject?.name ?? 'Local project'}</span>}<h3 title={tasks[activeTask].title}>{truncateTaskTitle(tasks[activeTask].title)}</h3></div></div><div className="preview-actions"><button className="execution-log-toggle" onClick={() => setExecutionLogsCollapsed(current => !current)} aria-expanded={!executionLogsCollapsed} title={language === 'zh' ? '显示或收起执行日志' : 'Show or hide execution logs'}><span>⌁</span>{language === 'zh' ? `日志 ${activeExecutionLogs.length}` : `Logs ${activeExecutionLogs.length}`}</button><button className="task-maximize-toggle" onClick={toggleTaskMaximized} aria-pressed={taskMaximized} aria-label={taskMaximized ? (language === "zh" ? "退出任务专注模式" : "Exit task focus mode") : (language === "zh" ? "最大化当前任务" : "Maximize current task")} title={taskMaximized ? (language === "zh" ? "退出专注模式（Esc）" : "Exit focus mode (Esc)") : (language === "zh" ? "最大化当前任务" : "Maximize current task")}>{taskMaximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>{(tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval') && <button className="secondary-btn task-interrupt" onClick={() => interruptTask(tasks[activeTask])}><Square size={13} /> {language === 'zh' ? '中断' : 'Interrupt'}</button>}{tasks[activeTask].remoteSessionId && tasks[activeTask].state !== 'running' && tasks[activeTask].state !== 'waiting_for_approval' && <button className="secondary-btn task-interrupt task-compact" onClick={() => compactTask(tasks[activeTask])} title={language === 'zh' ? '把之前的对话总结成摘要，之后每轮读取的上下文更少。压缩本身会消耗一次额度。' : 'Summarize the conversation so later turns read less context. Compacting itself uses some quota.'}><Shrink size={13} /> {language === 'zh' ? '压缩上下文' : 'Compact'}</button>}<button className="icon-btn selected-task-delete" onClick={() => deleteTask(tasks[activeTask], activeTask)} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} title={language === 'zh' ? '从 Relay 删除任务' : 'Remove task from Relay'} aria-label={language === 'zh' ? `删除 ${tasks[activeTask].title}` : `Delete ${tasks[activeTask].title}`}><Trash2 size={14} /></button></div></div>
             <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><TaskDuration task={tasks[activeTask]} language={language} />{tasks[activeTask].handoffTokens ? <span className="handoff-tokens" title={language === 'zh' ? '交接内容和检查点规则的估算 token' : 'Estimated tokens for handoffs and checkpoint rules'}>{language === 'zh' ? '交接' : 'Handoff'} ~{tasks[activeTask].handoffTokens.toLocaleString()} tokens</span> : null}</div>
             {(tasks[activeTask].pendingApprovals ?? []).map(approval => <ApprovalCard key={approval.id} approval={approval} agent={tasks[activeTask].agent} language={language} onRespond={response => respondToApproval(tasks[activeTask], approval.id, response)} />)}
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} hasOlder={historyCursor != null} loadingOlder={historyLoading} onLoadOlder={loadOlderTaskHistory} />

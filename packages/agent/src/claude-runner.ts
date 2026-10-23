@@ -27,12 +27,20 @@ export type ClaudeRuntime = {
 export type ClaudeReadiness = ClaudeRuntime & { loggedIn: boolean; account?: string }
 
 /** Same shape as Codex's account/rateLimits windows so the UI renders both alike. */
-export type ClaudeRateLimitWindow = { usedPercent: number; windowDurationMins: number; resetsAt: number }
+/** No resetsAt: the window has not started; Claude starts it with the next request. */
+export type ClaudeRateLimitWindow = { usedPercent: number; windowDurationMins: number; resetsAt?: number }
 export type ClaudeRateLimits = { primary: ClaudeRateLimitWindow; secondary?: ClaudeRateLimitWindow | null }
 
 const FIVE_HOURS = 300
 const SEVEN_DAYS = 7 * 24 * 60
 const RATE_LIMIT_CACHE_MS = 2 * 60 * 1_000
+
+export const claudeRateLimitCacheIsFresh = (cachedAt: number, limits: ClaudeRateLimits, now = Date.now()) => {
+  if (now - cachedAt >= RATE_LIMIT_CACHE_MS) return false
+  // A reset makes the utilization stale immediately, even when the cache was
+  // populated only moments before the boundary.
+  return [limits.primary, limits.secondary].every(window => !window?.resetsAt || window.resetsAt * 1_000 > now)
+}
 
 /** From the /usage data: utilization 0-100, resets_at ISO 8601. */
 const windowFromUsage = (value: unknown, windowDurationMins: number): ClaudeRateLimitWindow | undefined => {
@@ -107,6 +115,8 @@ export type ClaudeTurnCallbacks = {
   onFinished: (status: 'completed' | 'interrupted' | 'failed', error?: string) => void
   /** Claude started another turn by itself after onFinished, e.g. when a background command ended. */
   onBusy?: () => void
+  /** Claude summarized the conversation, after /compact or on its own. */
+  onCompacted?: (preTokens: number, postTokens?: number) => void
   requestPermission: (request: ClaudeToolRequest) => Promise<PermissionResult>
 }
 
@@ -212,7 +222,7 @@ export class ClaudeRunner {
    * rate_limit_event messages, so a future SDK change only loses idle refreshes.
    */
   async readRateLimits(): Promise<ClaudeRateLimits | null> {
-    if (this.rateLimitCache && Date.now() - this.rateLimitCache.at < RATE_LIMIT_CACHE_MS) return this.rateLimitCache.limits
+    if (this.rateLimitCache && claudeRateLimitCacheIsFresh(this.rateLimitCache.at, this.rateLimitCache.limits)) return this.rateLimitCache.limits
     const runtime = await this.resolveRuntime()
     if (runtime.source !== 'local' || !runtime.executable) return null
     const prompts = new PromptQueue()
@@ -221,9 +231,11 @@ export class ClaudeRunner {
       const readUsage = (probe as Partial<Pick<Query, 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET'>>).usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET
       if (typeof readUsage !== 'function') return this.rateLimitCache?.limits ?? null
       const usage = await readUsage.call(probe, { skipBehaviors: true })
-      const primary = windowFromUsage(usage.rate_limits?.five_hour, FIVE_HOURS)
-      if (!usage.rate_limits_available || !primary) return null
-      const limits = { primary, secondary: windowFromUsage(usage.rate_limits?.seven_day, SEVEN_DAYS) ?? null }
+      if (!usage.rate_limits_available) return null
+      // After a reset nothing is reported until the next request opens a new
+      // window; show it as unused instead of hiding the quota altogether.
+      const primary = windowFromUsage(usage.rate_limits?.five_hour, FIVE_HOURS) ?? { usedPercent: 0, windowDurationMins: FIVE_HOURS }
+      const limits = { primary, secondary: windowFromUsage(usage.rate_limits?.seven_day, SEVEN_DAYS) ?? { usedPercent: 0, windowDurationMins: SEVEN_DAYS } }
       this.storeRateLimits(limits)
       return limits
     } catch {
@@ -484,6 +496,8 @@ export class ClaudeRunner {
         for (const block of message.message.content) {
           if (block.type === 'tool_use') callbacks.onToolStarted(block.id, block.name, (block.input ?? {}) as Record<string, unknown>)
         }
+      } else if (message.type === 'system' && message.subtype === 'compact_boundary') {
+        callbacks.onCompacted?.(message.compact_metadata.pre_tokens, message.compact_metadata.post_tokens)
       } else if (message.type === 'user') {
         const content = message.message.content
         if (Array.isArray(content)) for (const block of content) {

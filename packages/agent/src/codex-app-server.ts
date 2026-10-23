@@ -117,6 +117,8 @@ export class CodexAppServer {
     await this.request('turn/start', { threadId, cwd, ...(explicitModel ? { model: explicitModel } : {}), ...(effort ? { effort } : {}), ...(sandboxPolicy ? { sandboxPolicy } : {}), input: [{ type: 'text', text }] })
   }
   async steerTurn(threadId: string, turnId: string, text: string) { await this.ensureStarted(); await this.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] }) }
+  /** Runs as a turn of its own: turn/started, a contextCompaction item, turn/completed. */
+  async compactThread(threadId: string) { await this.ensureStarted(); await this.request('thread/compact/start', { threadId }) }
   async interruptTurn(threadId: string, turnId: string) { await this.ensureStarted(); await this.request('turn/interrupt', { threadId, turnId }) }
   async readThread(threadId: string) { await this.ensureStarted(); return this.request('thread/read', { threadId, includeTurns: true }) }
   async listModels() {

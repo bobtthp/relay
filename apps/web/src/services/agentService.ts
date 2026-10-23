@@ -27,6 +27,7 @@ export type AgentService = {
   switchAgent(task: Task, agent: AgentName, model?: string, reasoningEffort?: string): Promise<Task>
   sendMessage(task: Task, message: string, model?: string, reasoningEffort?: string): Promise<{ ok: true; message: string }>
   interruptTask(task: Task): Promise<void>
+  compactTask(task: Task): Promise<void>
   deleteTask(task: Task): Promise<void>
   respondToApproval(task: Task, approvalId: string, response: Record<string, unknown>): Promise<void>
 }

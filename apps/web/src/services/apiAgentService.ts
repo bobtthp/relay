@@ -121,6 +121,11 @@ export const apiAgentService: AgentService = {
       throw new Error(body.error ?? 'Unable to interrupt task')
     }
   },
+  async compactTask(task) {
+    if (!task.id) throw new Error('Task id is missing')
+    const response = await authenticatedFetch(`/api/tasks/${encodeURIComponent(task.id)}/compact`, { method: 'POST' })
+    if (!response.ok) throw await requestError(response, 'Unable to compact context')
+  },
   async deleteTask(task) {
     if (!task.id) throw new Error('Task id is missing')
     const response = await authenticatedFetch(`/api/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' })
