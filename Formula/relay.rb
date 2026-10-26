@@ -3,16 +3,16 @@
 class Relay < Formula
   desc "Local web interface and agent service for Codex sessions"
   homepage "https://github.com/bobtthp/relay"
-  url "https://github.com/bobtthp/relay/releases/download/v0.2.1/relay-0.2.1.tar.gz"
-  sha256 "50c4fc06400b0081b9cb8d136ae54017e4361b5b183c23edae9a3e1ef3e7fb70"
+  url "https://github.com/bobtthp/relay/releases/download/v0.2.2/relay-0.2.2.tar.gz"
+  sha256 "99c93706ca576efd444e7820252801367bc2b0d37783bf6df546a5cdb59291d4"
   license "MIT"
 
   bottle do
-    root_url "https://github.com/bobtthp/relay/releases/download/v0.2.1"
-    sha256 cellar: :any, arm64_tahoe:   "2130ef8f9ec5452d51570ed328092972622524503b5adc6f3b94270752b765f1"
-    sha256 cellar: :any, arm64_sequoia: "ee2f4de1a6c33aa7597f1f9894b156932e523e7a3d9468215e8f87f4990544c1"
-    sha256 cellar: :any, tahoe:         "7a6a7025d5b91c420a715b29f830e553448b219273941a2a38ef7c1acbe10144"
-    sha256 cellar: :any, sequoia:       "d51f4025d3ca0d82795413a82db0b7b3856c9481ba5af45f374302b036feec8c"
+    root_url "https://github.com/bobtthp/relay/releases/download/v0.2.2"
+    sha256 cellar: :any, arm64_tahoe:   "75de77042669bb0f1c4d63845b004df484b9cd3280677b1130dfc3f60d69e14d"
+    sha256 cellar: :any, arm64_sequoia: "8e3dc2d49392aab0e8931a6135a9896227e05d31de93db8130902b54f39f2b21"
+    sha256 cellar: :any, tahoe:         "488b2c353c1f188447368d1488300b5e0540c604629f3417d29c28a36c27598b"
+    sha256 cellar: :any, sequoia:       "e1b458367122650e5bd4310b5430b7eabd9e0d4a5d683359a92ab929550be78e"
   end
 
   depends_on "node@22"
