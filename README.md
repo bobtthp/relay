@@ -132,8 +132,20 @@ For private remote access, install and sign in to Tailscale on the Mac and
 mobile device, then use Tailscale Serve as an HTTPS proxy to Relay. Open the
 Mac's Tailscale HTTPS address in Safari, enter the access token, and limit
 access with your tailnet ACLs. Do not expose port 3000 to the public internet.
-See the
-[private remote access guide](deploy/launchd/README.md#private-remote-access).
+See the [private remote access guide](deploy/launchd/README.md#private-remote-access).
+
+## Temporary project image uploads
+
+Select **Images** in a workspace to upload PNG, JPEG, GIF, or WebP files. Relay
+stores them under `/tmp/relay/uploads/<project-id>/` and shows the absolute path
+that Codex or Claude can use in a task. Each file is limited to 10 MB. These are
+temporary assets and macOS may remove them automatically.
+
+The Images page can also create a project-scoped collaborative upload link.
+Anyone with that unguessable link can upload images without the Relay access
+token, but cannot list images or see local paths. Regenerating or disabling the
+link revokes the old URL. Share it only over a trusted LAN or private network
+such as Tailscale; do not expose Relay to the public internet.
 
 ## Codex and Claude Code tasks
 

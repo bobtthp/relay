@@ -27,7 +27,7 @@ async function waitForService(url: string, child: ChildProcess) {
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Service exited before becoming ready: ${url}`)
     try {
-      const response = await fetch(url)
+      const response = await fetch(url, { signal: AbortSignal.timeout(1_000) })
       if (response.ok) return
     } catch { /* The process is still starting. */ }
     await new Promise(resolve => setTimeout(resolve, 250))
@@ -78,11 +78,32 @@ test.afterAll(async () => {
 })
 
 async function mockNonEnvironmentApi(page: Page) {
+  const imageItems: Array<{ name: string; path: string; size: number; mimeType: string; createdAt: string; previewUrl: string }> = []
+  let uploadShare: { active: boolean; url?: string; createdAt?: string } = { active: false }
   await page.route('**/api/**', async route => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname === '/api/environment' || url.pathname === '/api/environment/codex/install') {
       await route.continue()
+      return
+    }
+
+    if (url.pathname === '/api/projects/project-ci/images') {
+      if (request.method() === 'POST') {
+        const image = { name: 'uploaded.jpg', path: '/tmp/relay/uploads/project-ci/uploaded.jpg', size: 1234, mimeType: 'image/jpeg', createdAt: new Date().toISOString(), previewUrl: '/api/projects/project-ci/images/uploaded.jpg/content' }
+        imageItems.unshift(image)
+        await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(image) })
+      } else await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: imageItems }) })
+      return
+    }
+    if (url.pathname === '/api/projects/project-ci/images/uploaded.jpg/content') {
+      await route.fulfill({ status: 200, contentType: 'image/jpeg', body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) })
+      return
+    }
+    if (url.pathname === '/api/projects/project-ci/image-upload-share') {
+      if (request.method() === 'POST') uploadShare = { active: true, url: `${appUrl}/upload/test-share-token`, createdAt: new Date().toISOString() }
+      if (request.method() === 'DELETE') uploadShare = { active: false }
+      await route.fulfill(request.method() === 'DELETE' ? { status: 204, body: '' } : { status: 200, contentType: 'application/json', body: JSON.stringify(uploadShare) })
       return
     }
 
@@ -127,4 +148,19 @@ test('clicking Install Codex installs the CLI without signing in', async ({ page
 
   await expect(codexCard.locator('.environment-status')).toHaveText('Ready', { timeout: 15_000 })
   await expect(codexCard.getByRole('button', { name: 'Installed' })).toBeVisible()
+})
+
+test('uploads a temporary project image and creates a collaborative link', async ({ page }) => {
+  await mockNonEnvironmentApi(page)
+  await page.goto(appUrl)
+  await page.getByRole('button', { name: 'Images' }).click()
+  await expect(page.getByRole('heading', { name: 'Relay CI images' })).toBeVisible()
+
+  await page.locator('.image-drop-zone input').setInputFiles(path.resolve('en.jpg'))
+  await expect(page.getByText('/tmp/relay/uploads/project-ci/uploaded.jpg')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Copy path' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Create upload link' }).click()
+  await expect(page.locator('.image-share-link code')).toContainText('/upload/test-share-token')
+  await expect(page.getByRole('button', { name: 'Disable' })).toBeVisible()
 })

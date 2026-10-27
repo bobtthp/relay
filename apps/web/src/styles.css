@@ -586,3 +586,44 @@ button, input, select, textarea { font-family:var(--font-ui); font-size:var(--ty
 .memory-op-title { font-size:12px; font-weight:600; overflow-wrap:anywhere; }
 .memory-op small { color:#8490a0; font-size:11px; }
 .memory-op pre { margin:0; max-height:220px; overflow:auto; white-space:pre-wrap; color:#c0c6d0; font-size:11px; }
+.images-page { display:grid; gap:18px; width:100%; }
+.images-hero { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
+.images-temporary-note { padding:6px 9px; border:1px solid #5b4b2f; border-radius:99px; background:#211b12; color:#d8b578; font-size:11px; white-space:nowrap; }
+.images-layout { display:grid; grid-template-columns:minmax(0, 1.1fr) minmax(280px, .9fr); gap:14px; }
+.image-upload-card, .image-share-card { display:grid; align-content:start; gap:14px; min-width:0; padding:18px; border:1px solid var(--line); border-radius:9px; background:#121822; }
+.image-upload-card h2, .image-share-card h2, .images-list-header h2 { margin:3px 0 0; font-size:17px; }
+.image-share-card > p { margin:0; color:#8d98a8; font-size:12px; line-height:1.55; }
+.image-drop-zone { display:grid; place-items:center; gap:7px; padding:28px 16px; border:1px dashed #51458a; border-radius:8px; background:#0f141c; color:#a99bef; text-align:center; cursor:pointer; transition:.15s ease; }
+.image-drop-zone:hover, .image-drop-zone.dragging { border-color:#917cf0; background:#17142a; }
+.image-drop-zone strong { color:#d8d2f4; font-size:13px; }
+.image-drop-zone small { color:#768193; font-size:11px; }
+.image-drop-zone input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+.images-status { margin:0; color:#8d98a8; font-size:12px; }
+.images-error { margin:0; padding:10px 12px; border:1px solid #6e3b43; border-radius:7px; background:#24161a; color:#f0a0aa; font-size:12px; }
+.image-share-link { display:flex; align-items:center; gap:8px; min-width:0; padding:8px 9px; border:1px solid #303849; border-radius:6px; background:#0d1219; }
+.image-share-link code { flex:1; min-width:0; overflow:hidden; color:#bbb2ea; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.image-share-actions, .image-card-actions { display:flex; align-items:center; gap:8px; }
+.image-share-actions .primary-btn, .image-share-actions .secondary-btn, .image-card-actions .secondary-btn { display:inline-flex; align-items:center; gap:6px; }
+.images-list-header { display:flex; align-items:end; justify-content:space-between; margin-top:4px; }
+.images-list-header h2 small { margin-left:5px; color:#778294; font-size:11px; font-weight:500; }
+.image-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:13px; }
+.image-card { min-width:0; overflow:hidden; border:1px solid #29313d; border-radius:9px; background:#111720; }
+.image-preview { display:grid; place-items:center; aspect-ratio:16/10; overflow:hidden; border-bottom:1px solid #29313d; background:linear-gradient(135deg,#171c27,#0c1118); }
+.image-preview img { width:100%; height:100%; object-fit:cover; }
+.image-preview-placeholder { display:grid; place-items:center; color:#596578; }
+.image-card-body { display:grid; gap:7px; padding:12px; }
+.image-card-body strong { overflow:hidden; color:#dce1e9; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.image-card-body > small { color:#758193; font-size:10px; }
+.image-card-body > code { overflow:hidden; padding:7px; border-radius:5px; background:#0c1118; color:#9e95ca; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+.image-card-actions { justify-content:space-between; margin-top:2px; }
+.image-card-actions .secondary-btn { padding:6px 8px; font-size:10px; }
+.image-delete { color:#b97882; }
+.images-empty { display:grid; place-items:center; gap:7px; padding:44px 20px; border:1px dashed #303849; border-radius:9px; color:#687486; text-align:center; }
+.images-empty strong { color:#aeb6c3; font-size:13px; }
+.images-empty span { font-size:11px; }
+@media (max-width: 780px) {
+  .images-layout { grid-template-columns:1fr; }
+  .images-hero { display:grid; }
+  .images-temporary-note { justify-self:start; white-space:normal; }
+  .image-grid { grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); }
+}

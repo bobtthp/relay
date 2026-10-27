@@ -20,9 +20,13 @@ import { readApprovalSettings, writeApprovalSettings } from './approval-settings
 import { buildHandoff, checkpointDirectory, checkpointRule } from './handoff.js'
 import { MemoryConflictError, MemoryWatcher, applyConsolidation, consolidationInstructions, consolidationPrompt, discardConsolidation, memoryStats, parseConsolidationPlan, readConsolidation, storeConsolidationProposal, claudeMemoryPromptAppend, codexMemoryInstructions, deleteMemoryEntry, estimateTokens, memoryPrimer, importClaudeMemories, listMemoryEntries, memoryDirectory, previewClaudeImport, readMemoryAudit, readMemoryIndex, readMemorySettings, rollbackClaudeImport, setMemoryEnabled, touchesMemory, writeMemoryEntry } from './project-memory.js'
 import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
+import { deleteProjectImage, listProjectImages, projectImagePath, saveProjectImage } from './project-images.js'
+import { createProjectImageShare, deleteProjectImageShare, projectIdForImageShare, projectImageShare } from './project-image-shares.js'
 
 const app = express()
 const server = createServer(app)
+const imageUploadBody = express.raw({ type: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/octet-stream'], limit: '10mb' })
+const publicImageUploadAttempts = new Map<string, number[]>()
 const HISTORY_PAGE_SIZE = 10
 const port = Number(process.env.PORT ?? 3000)
 const host = process.env.RELAY_HOST ?? '0.0.0.0'
@@ -980,6 +984,52 @@ app.post('/api/auth/verify', (request, response) => authorized(request.headers)
 app.get('/api/health', (_request, response) => {
   response.json({ ok: true, mode: 'local-codex', service: 'relay-backend', codex: process.env.CODEX_BIN ?? 'codex' })
 })
+
+const htmlEscape = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!)
+const uploadFileName = (request: express.Request) => {
+  const encoded = request.get('x-relay-filename') ?? 'image'
+  try { return decodeURIComponent(encoded) } catch { return 'image' }
+}
+
+app.get('/upload/:token', (request, response) => {
+  const projectId = projectIdForImageShare(request.params.token)
+  const project = projects.find(item => item.id === projectId)
+  if (!project) return response.status(404).type('text').send('Upload link not found')
+  const nonce = randomBytes(16).toString('base64')
+  response.set({
+    'Content-Security-Policy': `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'self'`,
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+  })
+  return response.type('html').send(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>上传图片 · Relay</title>
+<style nonce="${nonce}">:root{color-scheme:dark;font-family:system-ui,sans-serif}*{box-sizing:border-box}body{min-height:100vh;margin:0;display:grid;place-items:center;padding:24px;background:#0d1118;color:#eef0f5}.card{width:min(100%,520px);padding:28px;border:1px solid #303849;border-radius:14px;background:#151a23;box-shadow:0 24px 70px #0006}h1{margin:5px 0 8px;font-size:25px}p{color:#9ca7b6;line-height:1.6}.drop{display:grid;place-items:center;gap:8px;margin:24px 0;padding:34px 18px;border:1px dashed #6657ba;border-radius:10px;background:#111620;text-align:center}.drop.drag{border-color:#aa9cff;background:#19162b}input{max-width:100%}button{padding:10px 16px;border:0;border-radius:7px;background:#6e54d9;color:white;font-weight:700;cursor:pointer}button:disabled{opacity:.5}.status{min-height:24px;margin-top:15px;color:#bdb5e9;font-size:13px}.hint{font-size:12px}</style>
+<main class="card"><small>RELAY COLLABORATIVE UPLOAD</small><h1>${htmlEscape(project.name)}</h1><p>选择图片后会直接上传到项目的临时图片库。</p><label class="drop" id="drop"><strong>拖放图片到这里</strong><span>PNG、JPEG、GIF、WebP · 单张不超过 10 MB</span><input id="files" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple></label><button id="upload">上传图片</button><div class="status" id="status"></div><p class="hint">图片保存在临时目录中，可能被系统自动清理。</p></main>
+<script nonce="${nonce}">const token=${JSON.stringify(request.params.token)},input=document.querySelector('#files'),drop=document.querySelector('#drop'),button=document.querySelector('#upload'),status=document.querySelector('#status');for(const event of ['dragenter','dragover'])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add('drag')});for(const event of ['dragleave','drop'])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove('drag')});drop.addEventListener('drop',e=>{input.files=e.dataTransfer.files});button.addEventListener('click',async()=>{const files=[...input.files];if(!files.length){status.textContent='请先选择图片';return}button.disabled=true;let done=0;try{for(const file of files){status.textContent='正在上传 '+file.name+'…';const response=await fetch('/api/public/image-uploads/'+encodeURIComponent(token),{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Relay-Filename':encodeURIComponent(file.name)},body:file});const body=await response.json();if(!response.ok)throw new Error(body.error||'上传失败');done++}input.value='';status.textContent='已上传 '+done+' 张图片'}catch(error){status.textContent=error.message||'上传失败'}finally{button.disabled=false}});</script></html>`)
+})
+
+const allowPublicImageUpload = (request: express.Request, response: express.Response, next: express.NextFunction) => {
+  const token = Array.isArray(request.params.token) ? request.params.token[0] ?? '' : request.params.token
+  const projectId = projectIdForImageShare(token)
+  if (!projects.some(item => item.id === projectId)) return response.status(404).json({ error: 'Upload link not found' })
+  const now = Date.now()
+  const rateKey = `${token}:${request.ip}`
+  const attempts = (publicImageUploadAttempts.get(rateKey) ?? []).filter(timestamp => now - timestamp < 60 * 60 * 1_000)
+  if (attempts.length >= 60) return response.set('Retry-After', '3600').status(429).json({ error: 'Upload limit reached. Try again later.' })
+  attempts.push(now)
+  publicImageUploadAttempts.set(rateKey, attempts)
+  response.locals.projectId = projectId
+  next()
+}
+
+app.post('/api/public/image-uploads/:token', allowPublicImageUpload, imageUploadBody, (request, response) => {
+  try {
+    if (!Buffer.isBuffer(request.body)) throw new Error('Provide an image file')
+    const image = saveProjectImage(String(response.locals.projectId), uploadFileName(request), request.get('content-type') ?? '', request.body)
+    return response.status(201).json({ name: image.name })
+  } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : 'Unable to upload image' }) }
+})
+
 app.use((request, response, next) => authorized(request.headers) ? next() : response.status(401).json({ error: 'Unauthorized' }))
 app.use(express.json({ limit: '64kb' }))
 
@@ -1103,6 +1153,63 @@ app.get('/api/projects/:projectId', (request, response) => {
   return response.json(project)
 })
 
+const imageProject = (projectId: string, response: express.Response) => {
+  const project = projects.find(item => item.id === projectId)
+  if (!project) { response.status(404).json({ error: 'Project not found' }); return undefined }
+  return project
+}
+const imageResponse = (projectId: string, image: ReturnType<typeof projectImagePath>) => ({
+  ...image,
+  previewUrl: `/api/projects/${encodeURIComponent(projectId)}/images/${encodeURIComponent(image.name)}/content`,
+})
+
+app.get('/api/projects/:projectId/images', (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  return response.json({ items: listProjectImages(request.params.projectId).map(image => imageResponse(request.params.projectId, image)) })
+})
+
+app.post('/api/projects/:projectId/images', imageUploadBody, (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  try {
+    if (!Buffer.isBuffer(request.body)) throw new Error('Provide an image file')
+    const image = saveProjectImage(request.params.projectId, uploadFileName(request), request.get('content-type') ?? '', request.body)
+    return response.status(201).json(imageResponse(request.params.projectId, image))
+  } catch (error) { return response.status(400).json({ error: error instanceof Error ? error.message : 'Unable to upload image' }) }
+})
+
+app.get('/api/projects/:projectId/images/:name/content', (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  try {
+    const image = projectImagePath(request.params.projectId, request.params.name)
+    response.set({ 'Cache-Control': 'private, max-age=300', 'X-Content-Type-Options': 'nosniff' })
+    return response.type(image.mimeType).sendFile(image.path)
+  } catch { return response.status(404).json({ error: 'Image not found' }) }
+})
+
+app.delete('/api/projects/:projectId/images/:name', (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  try { deleteProjectImage(request.params.projectId, request.params.name); return response.status(204).end() }
+  catch { return response.status(404).json({ error: 'Image not found' }) }
+})
+
+app.get('/api/projects/:projectId/image-upload-share', (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  const share = projectImageShare(request.params.projectId)
+  return response.json({ active: Boolean(share), ...(share ? { url: `${request.protocol}://${request.get('host')}/upload/${share.token}`, createdAt: share.createdAt } : {}) })
+})
+
+app.post('/api/projects/:projectId/image-upload-share', (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  const share = createProjectImageShare(request.params.projectId)
+  return response.json({ active: true, url: `${request.protocol}://${request.get('host')}/upload/${share.token}`, createdAt: share.createdAt })
+})
+
+app.delete('/api/projects/:projectId/image-upload-share', (request, response) => {
+  if (!imageProject(request.params.projectId, response)) return
+  deleteProjectImageShare(request.params.projectId)
+  return response.status(204).end()
+})
+
 app.get('/api/directories', (request, response) => {
   try {
     const requestedPath = typeof request.query.path === 'string' ? request.query.path : undefined
@@ -1129,6 +1236,7 @@ app.delete('/api/projects/:projectId', (request, response) => {
   if (tasks.some(task => task.projectId === project.id && (task.status === 'running' || task.status === 'waiting_for_approval'))) return response.status(409).json({ error: 'Finish or interrupt this workspace’s active task before removing it' })
   try {
     const nextPath = removeSavedProject(project.path)
+    deleteProjectImageShare(project.id)
     refreshProjects(nextPath)
     const taskIds = new Set(tasks.filter(task => task.projectId === project.id).map(task => task.id))
     for (let index = tasks.length - 1; index >= 0; index--) if (taskIds.has(tasks[index].id)) tasks.splice(index, 1)
