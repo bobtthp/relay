@@ -24,6 +24,7 @@ export class CodexAppServer {
 
   private process?: ChildProcessWithoutNullStreams
   private startup?: Promise<void>
+  private authRefresh?: Promise<void>
   private nextId = 1
   private pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout }>()
   private handlers = new Set<NotificationHandler>()
@@ -165,7 +166,23 @@ export class CodexAppServer {
     return { text, usage }
   }
 
-  async readRateLimits() { await this.ensureStarted(); return this.request('account/rateLimits/read', {}) }
+  async readRateLimits() {
+    await this.ensureStarted()
+    try { return await this.request('account/rateLimits/read', {}) }
+    catch (error) {
+      // A profile is often added before its terminal login is completed. The
+      // already-running app-server does not reload auth.json, so restart it
+      // once after an auth failure and let it pick up the new credentials.
+      if (!(error instanceof Error) || !/(?:^|\D)401(?:\D|$)|unauthorized/i.test(error.message)) throw error
+      if (!this.authRefresh) {
+        this.restart()
+        const refresh = this.ensureStarted().finally(() => { if (this.authRefresh === refresh) this.authRefresh = undefined })
+        this.authRefresh = refresh
+      }
+      await this.authRefresh
+      return this.request('account/rateLimits/read', {})
+    }
+  }
   stop() { this.process?.kill('SIGTERM') }
   /** Stops the current process; the next request starts one with fresh launch options. */
   restart() {
