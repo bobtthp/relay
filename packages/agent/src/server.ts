@@ -1074,6 +1074,19 @@ function handleCodexNotification(accountId: string, message: RpcMessage) {
       const changes = normalizeFileChanges(item.changes)
       const text = formatFileChangeProgress(changes)
       if (text || !completed) upsertProgressEvent(task.id, item.id, text || progress, completed ? 'completed' : 'running', 'change')
+    } else if (item.type === 'agentMessage' && completed) {
+      // Local or non-streaming models deliver text as aggregatedOutput on
+      // item/completed instead of item/agentMessage/delta. Emit it as a
+      // conversation message so the UI shows it in the chat, not the log.
+      const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput.trim() : ''
+      if (output) appendEvent({
+        id: `event-${randomUUID()}`,
+        taskId: task.id,
+        type: 'assistant_message',
+        payload: { text: output, method: 'item/agentMessage/delta', itemId: typeof item.id === 'string' ? item.id : undefined },
+        sequence: 0,
+        createdAt: new Date().toISOString(),
+      })
     } else if (progress) {
       const exitCode = typeof item.exitCode === 'number' ? item.exitCode : undefined
       const command = typeof item.command === 'string' ? item.command : ''
