@@ -80,6 +80,11 @@ test.afterAll(async () => {
 async function mockNonEnvironmentApi(page: Page) {
   const imageItems: Array<{ name: string; path: string; size: number; mimeType: string; createdAt: string; previewUrl: string }> = []
   let uploadShare: { active: boolean; url?: string; createdAt?: string } = { active: false }
+  let providerSettings: { deepseek: { configured: boolean; source: null; keyHint: null }; localModel: { configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null }; localRegressionEnabled: boolean; proxy: { url: null; systemProxy: null }; checkpointsEnabled: boolean } = { deepseek: { configured: false, source: null, keyHint: null }, localModel: { configured: false, name: null, baseUrl: null, model: null, keyHint: null }, localRegressionEnabled: false, proxy: { url: null, systemProxy: null }, checkpointsEnabled: false }
+  const agentAccounts = [
+    { id: 'codex-default', name: 'Codex 默认账号', agent: 'Codex', configDirectory: '/tmp/codex-default', isDefault: true, createdAt: new Date(0).toISOString(), loginCommand: 'codex login' },
+    { id: 'claude-default', name: 'Claude 默认账号', agent: 'Claude', configDirectory: '/tmp/claude-default', isDefault: true, createdAt: new Date(0).toISOString(), loginCommand: 'claude' },
+  ]
   await page.route('**/api/**', async route => {
     const request = route.request()
     const url = new URL(request.url())
@@ -94,6 +99,27 @@ async function mockNonEnvironmentApi(page: Page) {
         imageItems.unshift(image)
         await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(image) })
       } else await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: imageItems }) })
+      return
+    }
+    if (url.pathname === '/api/agent-accounts') {
+      if (request.method() === 'POST') {
+        const input = request.postDataJSON() as { name: string; agent: 'Codex' | 'Claude' }
+        const account = { id: 'account-01234567-89ab-cdef-0123-456789abcdef', name: input.name, agent: input.agent, configDirectory: `/tmp/${input.agent.toLowerCase()}-personal-1`, createdAt: new Date().toISOString(), loginCommand: `${input.agent === 'Codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR'}=/tmp/profile ${input.agent.toLowerCase()}` }
+        agentAccounts.push(account)
+        await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(account) })
+      } else await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: agentAccounts }) })
+      return
+    }
+    if (url.pathname === '/api/settings/providers') {
+      if (request.method() === 'PUT') {
+        const input = request.postDataJSON() as { localModel?: { name: string; baseUrl: string; model: string; apiKey?: string | null } | null; localRegressionEnabled?: boolean }
+        if ('localModel' in input) providerSettings = {
+          ...providerSettings,
+          localModel: input.localModel ? { configured: true, name: input.localModel.name, baseUrl: input.localModel.baseUrl, model: input.localModel.model, keyHint: input.localModel.apiKey ? '…test' : null } : { configured: false, name: null, baseUrl: null, model: null, keyHint: null },
+        }
+        if (typeof input.localRegressionEnabled === 'boolean') providerSettings = { ...providerSettings, localRegressionEnabled: input.localRegressionEnabled }
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(providerSettings) })
       return
     }
     if (url.pathname === '/api/projects/project-ci/images/uploaded.jpg/content') {
@@ -111,7 +137,7 @@ async function mockNonEnvironmentApi(page: Page) {
     if (url.pathname === '/api/projects') {
       body = { items: [{ id: 'project-ci', name: 'Relay CI', path: tempDir, branch: 'main', clean: true }] }
     } else if (url.pathname === '/api/projects/project-ci/tasks') {
-      body = { items: [{ id: 'task-ci', title: 'Install UI smoke test', agent: 'Codex', status: 'completed', lastActivityAt: new Date().toISOString() }] }
+      body = { items: [{ id: 'task-ci', title: 'Install UI smoke test', agent: 'Codex', accountId: 'codex-default', status: 'completed', lastActivityAt: new Date().toISOString() }] }
     } else if (url.pathname === '/api/machines') {
       body = { items: [{ id: 'machine-ci', name: 'GitHub Actions' }] }
     } else if (url.pathname === '/api/account/rate-limits') {
@@ -163,4 +189,30 @@ test('uploads a temporary project image and creates a collaborative link', async
   await page.getByRole('button', { name: 'Create upload link' }).click()
   await expect(page.locator('.image-share-link code')).toContainText('/upload/test-share-token')
   await expect(page.getByRole('button', { name: 'Disable' })).toBeVisible()
+})
+
+test('adds reusable named agent accounts from local settings', async ({ page }) => {
+  await mockNonEnvironmentApi(page)
+  await page.goto(appUrl)
+  await page.getByRole('button', { name: 'Agent settings' }).click()
+  const settings = page.locator('.agent-settings-page')
+  await expect(settings.getByRole('heading', { name: 'Agent settings' })).toBeVisible()
+  await settings.getByLabel('Account name').fill('Personal 1')
+  await settings.getByRole('button', { name: 'Add account' }).click()
+  await expect(settings.getByText('Personal 1', { exact: true })).toBeVisible()
+  await expect(settings.getByRole('button', { name: 'Copy Personal 1 login command' })).toBeVisible()
+})
+
+test('configures a local model provider from Agent settings', async ({ page }) => {
+  await mockNonEnvironmentApi(page)
+  await page.goto(appUrl)
+  await page.getByRole('button', { name: 'Agent settings' }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Ollama')
+  await page.getByLabel('Base URL').fill('http://127.0.0.1:11434/v1')
+  await page.getByLabel('Model ID').fill('qwen2.5-coder:7b')
+  await page.getByRole('button', { name: 'Save provider' }).click()
+  await expect(page.getByText('Configured Ollama · qwen2.5-coder:7b')).toBeVisible()
+  const delegation = page.getByLabel('Delegate pre-commit regression locally')
+  await delegation.check()
+  await expect(delegation).toBeChecked()
 })

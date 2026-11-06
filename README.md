@@ -154,6 +154,20 @@ tasks use the same approval cards and automatic-approval setting as Codex:
 commands, file edits with a diff, and Claude's questions. The top bar shows the
 5-hour and 7-day usage windows for the agent of the selected task.
 
+### Multiple local Agent accounts
+
+Relay can keep any number of named Codex and Claude account profiles, such as
+`Personal 1`, `Personal 2`, or `Client A`. Open **Agent accounts** in the web
+interface to add a profile, then copy its login command and complete the normal
+CLI login in Terminal. Profiles are available to every project; each task keeps
+the account it selected, and an idle task can switch to another profile.
+
+Relay stores profile names and isolated config-directory paths in
+`~/.relay-web/agent-accounts.json`. Codex and Claude keep their own credentials
+inside those directories; Relay does not put tokens or passwords in its config
+file. Removing a profile keeps its login directory on disk to avoid deleting
+credentials unexpectedly.
+
 ### Switch agents within a task
 
 When an agent runs out of quota, or you simply want the other one, use the
@@ -196,6 +210,22 @@ To use DeepSeek models in Codex tasks, enter a DeepSeek API key in Settings.
 stores the key only on this Mac and configures the provider itself; you do not
 need to edit `~/.codex/config.toml`.
 
+## Local models
+
+Open **Agent settings → Local model** to add a model served from this Mac.
+Enter a loopback Base URL such as `http://127.0.0.1:11434/v1`, the model ID,
+and an optional API key. The model then appears in the Codex model selector;
+Relay keeps Codex as the tool and approval runtime while inference stays on the
+configured local endpoint. The endpoint must implement the Responses API at
+`/responses`; a Chat Completions-only server is not sufficient.
+
+Enable **Delegate pre-commit regression locally** in the same card to gate an
+agent's `git commit` command. Relay runs the repository's shared `ci-local`
+entry when present, otherwise its standard check, test, build, and UI install
+scripts. The local model reviews the bounded result. A failed command, invalid
+model verdict, unavailable local endpoint, or changed worktree snapshot blocks
+the commit request.
+
 ## Network proxy
 
 The Relay service runs in the background and does not inherit proxy variables
@@ -208,7 +238,8 @@ Without it, Claude requests can fail with `403 Request not allowed`.
 Open the settings button in the top-right corner to change the reading size
 and interface language. You can enable task-completion sounds, choose Chime,
 Bell, or Digital, adjust the volume, and preview the sound. Settings also hold
-the DeepSeek API key, the HTTP proxy, and agent-handoff checkpoints. Automatic
+the DeepSeek API key, local model and regression delegation, the HTTP proxy,
+and agent-handoff checkpoints. Automatic
 approval is optional and off by default; review its description in Settings
 before enabling it.
 
@@ -218,7 +249,7 @@ Everything stays on the Mac under `~/.relay-web/` (or `$RELAY_DATA_DIR`):
 
 ```text
 auth-token               access token for the browser
-provider-settings.json   DeepSeek API key, HTTP proxy, checkpoint setting (mode 600)
+provider-settings.json   Provider keys, local model/regression, proxy, checkpoints (mode 600)
 projects/<hash>/
   state.json             Relay's task and event cache for the project
   memory/                shared project memory (MEMORY.md is rebuilt by Relay)

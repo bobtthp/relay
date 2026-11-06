@@ -138,9 +138,9 @@ export class CodexAppServer {
    * A single question on a throwaway read-only thread that never asks for
    * approval; used for maintenance jobs such as consolidating shared memory.
    */
-  async runOneShot(cwd: string, prompt: string, options: { model?: string; developerInstructions: string }) {
+  async runOneShot(cwd: string, prompt: string, options: { model?: string; modelProvider?: string; developerInstructions: string }) {
     await this.ensureStarted()
-    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions })
+    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions, ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}) })
     const threadId = (result.thread as { id?: string } | undefined)?.id
     if (!threadId) throw new Error('Codex app-server did not return a thread id')
     let text = ''

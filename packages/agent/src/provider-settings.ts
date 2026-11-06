@@ -5,6 +5,14 @@ import path from 'node:path'
 
 export type ProviderSettings = {
   deepseekApiKey?: string
+  localModel?: {
+    name: string
+    baseUrl: string
+    model: string
+    apiKey?: string
+  }
+  /** Gate git commit approvals on deterministic checks reviewed by the configured local model. */
+  localRegressionEnabled?: boolean
   /** HTTP(S) proxy for agent traffic. Background services do not inherit a shell's proxy variables. */
   httpProxy?: string
   /** Ask agents to keep a per-task checkpoint so a switched-in agent knows the progress. Costs tokens. */
@@ -13,6 +21,8 @@ export type ProviderSettings = {
 
 export type ProviderSettingsStatus = {
   deepseek: { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
+  localModel: { configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null }
+  localRegressionEnabled: boolean
   proxy: { url: string | null; systemProxy: string | null }
   checkpointsEnabled: boolean
 }
@@ -22,6 +32,9 @@ const settingsPath = path.join(dataDirectory, 'provider-settings.json')
 
 export const DEEPSEEK_PROVIDER_ID = 'deepseek'
 export const DEEPSEEK_ENV_KEY = 'DEEPSEEK_API_KEY'
+export const LOCAL_MODEL_PROVIDER_ID = 'relay-local'
+export const LOCAL_MODEL_ENV_KEY = 'RELAY_LOCAL_MODEL_API_KEY'
+export const LOCAL_MODEL_PREFIX = 'relay-local:'
 
 // Relay defines the provider itself so DeepSeek works without editing
 // ~/.codex/config.toml. DeepSeek serves the Responses API that Codex requires.
@@ -44,12 +57,60 @@ export const deepseekModels = [
 ]
 
 export const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
+export const isLocalModel = (model?: string) => model?.startsWith(LOCAL_MODEL_PREFIX) === true
+export const localModelId = (model?: string) => isLocalModel(model) ? model!.slice(LOCAL_MODEL_PREFIX.length) : model
+
+const tomlString = (value: string) => JSON.stringify(value)
+
+export function normalizeLocalModelUrl(value: string) {
+  try {
+    const url = new URL(value.trim())
+    const hostname = url.hostname.toLowerCase()
+    const loopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
+    if (url.protocol !== 'http:' || !loopback || url.username || url.password || url.search || url.hash) return undefined
+    const pathname = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '')
+    return `${url.protocol}//${url.host}${pathname}`
+  } catch { return undefined }
+}
+
+export function localModelProviderOverrides(settings: ProviderSettings) {
+  const local = settings.localModel
+  if (!local) return []
+  return [
+    `model_providers.${LOCAL_MODEL_PROVIDER_ID}.name=${tomlString(local.name)}`,
+    `model_providers.${LOCAL_MODEL_PROVIDER_ID}.base_url=${tomlString(local.baseUrl)}`,
+    `model_providers.${LOCAL_MODEL_PROVIDER_ID}.wire_api="responses"`,
+    `model_providers.${LOCAL_MODEL_PROVIDER_ID}.requires_openai_auth=false`,
+    `model_providers.${LOCAL_MODEL_PROVIDER_ID}.supports_websockets=false`,
+    ...(local.apiKey ? [`model_providers.${LOCAL_MODEL_PROVIDER_ID}.env_key="${LOCAL_MODEL_ENV_KEY}"`] : []),
+  ]
+}
+
+export function localModelCatalog(settings: ProviderSettings) {
+  const local = settings.localModel
+  if (!local) return []
+  return [{
+    id: `${LOCAL_MODEL_PREFIX}${local.model}`,
+    model: `${LOCAL_MODEL_PREFIX}${local.model}`,
+    displayName: `${local.name} · ${local.model}`,
+    description: `Local Responses API at ${local.baseUrl}`,
+    provider: LOCAL_MODEL_PROVIDER_ID,
+  }]
+}
 
 export function readProviderSettings(): ProviderSettings {
   try {
     const stored = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Partial<ProviderSettings>
     return {
       ...(typeof stored.deepseekApiKey === 'string' && stored.deepseekApiKey ? { deepseekApiKey: stored.deepseekApiKey } : {}),
+      ...(stored.localModel
+        && typeof stored.localModel.name === 'string'
+        && typeof stored.localModel.model === 'string'
+        && typeof stored.localModel.baseUrl === 'string'
+        && normalizeLocalModelUrl(stored.localModel.baseUrl)
+        ? { localModel: { name: stored.localModel.name, model: stored.localModel.model, baseUrl: normalizeLocalModelUrl(stored.localModel.baseUrl)!, ...(typeof stored.localModel.apiKey === 'string' && stored.localModel.apiKey ? { apiKey: stored.localModel.apiKey } : {}) } }
+        : {}),
+      ...(stored.localRegressionEnabled === true ? { localRegressionEnabled: true } : {}),
       ...(typeof stored.httpProxy === 'string' && normalizeProxyUrl(stored.httpProxy) ? { httpProxy: normalizeProxyUrl(stored.httpProxy) } : {}),
       ...(stored.checkpointsEnabled === true ? { checkpointsEnabled: true } : {}),
     }
@@ -113,6 +174,14 @@ export function providerSettingsStatus(settings: ProviderSettings): ProviderSett
       source: settings.deepseekApiKey ? 'relay' : key ? 'environment' : null,
       keyHint: key ? `…${key.slice(-4)}` : null,
     },
+    localModel: settings.localModel ? {
+      configured: true,
+      name: settings.localModel.name,
+      baseUrl: settings.localModel.baseUrl,
+      model: settings.localModel.model,
+      keyHint: settings.localModel.apiKey ? `…${settings.localModel.apiKey.slice(-4)}` : null,
+    } : { configured: false, name: null, baseUrl: null, model: null, keyHint: null },
+    localRegressionEnabled: settings.localRegressionEnabled === true && Boolean(settings.localModel),
     proxy: { url: settings.httpProxy ? maskProxy(settings.httpProxy) : null, systemProxy: detectSystemProxy() },
     checkpointsEnabled: settings.checkpointsEnabled === true,
   }

@@ -2,13 +2,14 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  Archive, Brain, Check, ChevronDown, ChevronRight, Copy,
+  Archive, Bot, Brain, Check, ChevronDown, ChevronRight, Copy,
   Code2, FolderGit2, Laptop, Menu, MessageSquare, MoreHorizontal,
   Images, Maximize2, Minimize2, Plus, Search, Settings, Shrink, Sparkles, Square, TerminalSquare, Trash2, X, Zap,
 } from 'lucide-react'
 import { MemoryPanel } from './MemoryPanel'
 import { ProjectImagesPanel } from './ProjectImagesPanel'
-import { AgentRequestError, apiAgentService, getTaskTokenUsage, listClaudeModels, listCodexModels, listTaskEvents, listTaskHistory, type CodexModel } from './services/apiAgentService'
+import { AgentSettingsPage } from './AgentSettingsPage'
+import { AgentRequestError, apiAgentService, getTaskTokenUsage, listAgentAccounts, listClaudeModels, listCodexModels, listTaskEvents, listTaskHistory, type AgentAccount, type CodexModel } from './services/apiAgentService'
 import { isExecutionLog, isFinalAssistantMessage, isStreamingDelta, mergeEventSnapshots, mergeSessionTimeline, type TranscriptMessage } from './services/chatTranscript'
 import { type AgentName, type Task } from './services/agentService'
 import { authenticatedFetch, getRelayAccessToken } from './services/auth'
@@ -26,9 +27,10 @@ const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limit
 type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
 const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
 const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
+const isLocalModel = (model?: string) => model?.startsWith('relay-local:') === true
 const quotaForModel = (model: string | undefined, rateLimitsByLimitId: Record<string, RateLimits>, fallback: RateLimits | null) => {
-  // DeepSeek models are billed to the DeepSeek API key, not a ChatGPT quota pool.
-  if (isDeepSeekModel(model)) return null
+  // External and local providers do not use a ChatGPT quota pool.
+  if (isDeepSeekModel(model) || isLocalModel(model)) return null
   const limitId = quotaLimitIdForModel(model)
   // A depleted provider pool must not disable a different provider that still has quota.
   return rateLimitsByLimitId[limitId] ?? (limitId === 'base_model_inference' ? rateLimitsByLimitId.luna ?? null : fallback)
@@ -38,6 +40,7 @@ const isLunaModel = (model: string | Pick<CodexModel, 'model' | 'displayName'> |
   return value.toLowerCase().includes('luna')
 }
 type DeepSeekStatus = { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
+type LocalModelStatus = { configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null }
 type ProxyStatus = { url: string | null; systemProxy: string | null }
 type EnvironmentItem = { id?: 'codex' | 'claude'; label: string; installed: boolean; version?: string; status?: 'installing' | 'failed'; detail?: string; runtime?: 'local' | 'outdated' | 'missing'; loggedIn?: boolean; requiredVersion?: string; account?: string }
 type CompletionSound = 'chime' | 'bell' | 'digital'
@@ -239,7 +242,28 @@ type ComposerActions = {
   sendMessage: (message: string) => void
   changeTaskModel: (model: string) => void
   switchAgent: (agent: AgentName) => void
+  switchAccount: (accountId: string) => void
 }
+
+type TaskControlProps = {
+  actions: { current: ComposerActions }
+  agent: AgentName
+  language: 'en' | 'zh'
+  models: CodexModel[]
+  model: string
+  modelDisabled: boolean
+  agentSwitchDisabled: boolean
+  accounts: AgentAccount[]
+  accountId?: string
+  effortOptions: NonNullable<CodexModel['supportedReasoningEfforts']>
+  effort: string
+  effortDisabled: boolean
+  onEffortChange: (effort: string) => void
+}
+
+const TaskControlRow = memo(function TaskControlRow({ actions, agent, language, models, model, modelDisabled, agentSwitchDisabled, accounts, accountId, effortOptions, effort, effortDisabled, onEffortChange, className = 'task-top-controls' }: TaskControlProps & { className?: string }) {
+  return <div className={className}><div className="composer-model-row"><div className="agent-switch" role="group" aria-label={language === 'zh' ? '切换 Agent' : 'Switch agent'}>{(['Codex', 'Claude'] as const).map(option => <button key={option} type="button" className={option === agent ? 'active' : ''} aria-pressed={option === agent} disabled={agentSwitchDisabled || option === agent} title={language === 'zh' ? `下一轮由 ${option} 接手，会自动交接进度` : `${option} takes over from the next turn with a handoff`} onClick={() => actions.current.switchAgent(option)}>{option}</button>)}</div><div className="composer-account"><label>{language === 'zh' ? '账号' : 'Account'}</label><select className="model-select" aria-label={language === 'zh' ? '账号' : 'Account'} value={accountId ?? ''} disabled={agentSwitchDisabled} onChange={event => actions.current.switchAccount(event.target.value)}>{accounts.filter(account => account.agent === agent).map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></div><div className="composer-settings"><label className="composer-setting"><span>Model</span><select className="model-select" aria-label="Model" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select></label>{effortOptions.length > 0 && <label className="composer-setting"><span>{language === 'zh' ? '推理强度' : 'Reasoning level'}</span><select className="model-select" aria-label={language === 'zh' ? '推理强度' : 'Reasoning level'} value={effort} disabled={effortDisabled} onChange={event => onEffortChange(event.target.value)} title={effortDisabled ? (language === 'zh' ? '当前轮次已使用所选强度' : 'The current turn is already using its selected level') : (language === 'zh' ? '为下一轮选择推理强度' : 'Choose a reasoning level for the next turn')}>{effortOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select></label>}</div></div></div>
+})
 
 const TaskComposer = memo(function TaskComposer({
   actions,
@@ -248,22 +272,11 @@ const TaskComposer = memo(function TaskComposer({
   quotaBlocked,
   quotaModel,
   language,
-  models,
-  model,
-  modelDisabled,
-  agentSwitchDisabled,
   sendHint,
-}: {
-  actions: { current: ComposerActions }
-  agent: AgentName
+}: TaskControlProps & {
   disabled: boolean
   quotaBlocked: boolean
   quotaModel: string
-  language: 'en' | 'zh'
-  models: CodexModel[]
-  model: string
-  modelDisabled: boolean
-  agentSwitchDisabled: boolean
   sendHint: string
 }) {
   const [draft, setDraft] = useState('')
@@ -273,7 +286,7 @@ const TaskComposer = memo(function TaskComposer({
     setDraft('')
   }
 
-  return <div className="composer"><div className="composer-model-row"><div className="agent-switch" role="group" aria-label={language === 'zh' ? '切换 Agent' : 'Switch agent'}>{(['Codex', 'Claude'] as const).map(option => <button key={option} type="button" className={option === agent ? 'active' : ''} aria-pressed={option === agent} disabled={agentSwitchDisabled || option === agent} title={language === 'zh' ? `下一轮由 ${option} 接手，会自动交接进度` : `${option} takes over from the next turn with a handoff`} onClick={() => actions.current.switchAgent(option)}>{option}</button>)}</div><label htmlFor="turn-model">Model</label><select id="turn-model" className="model-select" value={model} disabled={modelDisabled} onChange={event => actions.current.changeTaskModel(event.target.value)} title={modelDisabled ? 'Model changes apply to the next turn' : 'Choose a model for the next turn'}>{models.map(item => <option key={item.model} value={item.model}>{item.displayName || item.model}</option>)}</select><span>Applies to the next turn</span></div><textarea disabled={disabled} placeholder={quotaBlocked ? (language === 'zh' ? `${quotaModel} 额度已用完，请切换到 Luna 或等待额度重置` : `${quotaModel} quota exhausted. Switch to Luna or wait for the quota reset.`) : disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{quotaBlocked ? (language === 'zh' ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
+  return <div className="composer"><textarea disabled={disabled} placeholder={quotaBlocked ? (language === 'zh' ? `${quotaModel} 额度已用完，请切换到 Luna 或等待额度重置` : `${quotaModel} quota exhausted. Switch to Luna or wait for the quota reset.`) : disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{quotaBlocked ? (language === 'zh' ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
 })
 
 let completionAudioContext: AudioContext | undefined
@@ -347,6 +360,8 @@ function App() {
   const [autoAcceptDefaultMcpForms, setAutoAcceptDefaultMcpForms] = useState(false)
   const [deepseekStatus, setDeepseekStatus] = useState<DeepSeekStatus>({ configured: false, source: null, keyHint: null })
   const [deepseekKeyDraft, setDeepseekKeyDraft] = useState('')
+  const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus>({ configured: false, name: null, baseUrl: null, model: null, keyHint: null })
+  const [localRegressionEnabled, setLocalRegressionEnabled] = useState(false)
   const [deepseekSaving, setDeepseekSaving] = useState(false)
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ url: null, systemProxy: null })
   const [proxyDraft, setProxyDraft] = useState('')
@@ -369,11 +384,13 @@ function App() {
   // reset-triggered refresh is not swallowed by an in-flight pre-reset poll.
   const codexRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
   const claudeRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
-  const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {}, switchAgent: () => {} })
+  const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {}, switchAgent: () => {}, switchAccount: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskAgent, setNewTaskAgent] = useState<AgentName>('Codex')
+  const [agentAccounts, setAgentAccounts] = useState<AgentAccount[]>([])
+  const [newTaskAccountId, setNewTaskAccountId] = useState(() => localStorage.getItem('relay-codex-account') ?? 'codex-default')
   const [models, setModels] = useState<CodexModel[]>([])
   const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('relay-codex-model') || '')
   const [selectedEffort, setSelectedEffort] = useState(() => localStorage.getItem('relay-codex-effort') || '')
@@ -407,7 +424,7 @@ function App() {
   const [visibleChatCount, setVisibleChatCount] = useState(CHAT_HISTORY_PAGE_SIZE)
   const [historyCursor, setHistoryCursor] = useState<string | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
-  const [activeView, setActiveView] = useState<'projects' | 'overview' | 'activity' | 'memory' | 'images'>('projects')
+  const [activeView, setActiveView] = useState<'projects' | 'overview' | 'activity' | 'memory' | 'images' | 'agents'>('projects')
   const [memoryReloadKey, setMemoryReloadKey] = useState(0)
   const [activityEvents, setActivityEvents] = useState<Array<{ taskId: string; taskTitle: string; role: 'user' | 'assistant' | 'progress'; text: string; createdAt: string }>>([])
   const [activityLoading, setActivityLoading] = useState(false)
@@ -481,6 +498,7 @@ function App() {
     ? [{ task: tasks[activeTask], index: activeTask, selected: true }, ...visibleTasks.filter(({ index }) => index !== activeTask).map(option => ({ ...option, selected: false }))]
     : visibleTasks.map(option => ({ ...option, selected: false }))
   const statusLabel = (state: Task['state']) => ({ running: text.running, completed: text.completed, failed: language === 'zh' ? '失败' : 'Failed', interrupted: language === 'zh' ? '已中断' : 'Interrupted', waiting_for_approval: language === 'zh' ? '等待批准' : 'Waiting for approval' })[state]
+  const taskOptionLabel = (task: Task, selected: boolean, compact = false) => `${selected ? (language === 'zh' ? '已选 · ' : 'Selected · ') : `${statusLabel(task.state)} · `}${compact ? truncateTaskTitle(task.title.replace(/\s+/g, ' ').trim(), 16) : task.title}`
   const selectedModelInfo = models.find(model => model.model === selectedModel)
   const reasoningOptions = selectedModelInfo?.supportedReasoningEfforts ?? []
   const lunaQuota = rateLimitsByLimitId.base_model_inference ?? rateLimitsByLimitId.luna ?? null
@@ -495,11 +513,14 @@ function App() {
     ? lunaModel.model
     : selectedModel
   const effectiveModelInfo = models.find(model => model.model === effectiveModel)
-  const effectiveEffort = effectiveModelInfo?.supportedReasoningEfforts?.some(option => option.reasoningEffort === selectedEffort)
-    ? selectedEffort
-    : effectiveModelInfo?.defaultReasoningEffort ?? effectiveModelInfo?.supportedReasoningEfforts?.[0]?.reasoningEffort ?? selectedEffort
+  const effectiveEffort = isLocalModel(effectiveModel)
+    ? ''
+    : effectiveModelInfo?.supportedReasoningEfforts?.some(option => option.reasoningEffort === selectedEffort)
+      ? selectedEffort
+      : effectiveModelInfo?.defaultReasoningEffort ?? effectiveModelInfo?.supportedReasoningEfforts?.[0]?.reasoningEffort ?? selectedEffort
   const quotaExhausted = quotaIsExhausted(quotaForModel(effectiveModel, rateLimitsByLimitId, rateLimit))
   const activeAgent = tasks[activeTask]?.agent ?? 'Codex'
+  const activeAccountId = tasks[activeTask]?.accountId ?? (activeAgent === 'Claude' ? 'claude-default' : 'codex-default')
   // ChatGPT quota only gates Codex; Claude has its own usage limits.
   const activeQuotaExhausted = activeAgent === 'Codex' && quotaExhausted
   const newTaskQuotaExhausted = newTaskAgent === 'Codex' && quotaExhausted
@@ -646,6 +667,7 @@ function App() {
   useEffect(() => { localStorage.setItem('relay-completion-volume', String(completionSoundVolume)) }, [completionSoundVolume])
   useEffect(() => { localStorage.setItem('relay-completion-sound-style', completionSound) }, [completionSound])
   useEffect(() => {
+    void listAgentAccounts().then(accounts => setAgentAccounts(accounts)).catch(() => undefined)
     void authenticatedFetch('/api/settings/approvals').then(async response => {
       if (!response.ok) return
       const settings = await response.json() as { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean }
@@ -654,20 +676,29 @@ function App() {
     }).catch(() => undefined)
     void authenticatedFetch('/api/settings/providers').then(async response => {
       if (!response.ok) return
-      const settings = await response.json() as { deepseek?: DeepSeekStatus; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
+      const settings = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
       if (settings.deepseek) setDeepseekStatus(settings.deepseek)
+      if (settings.localModel) setLocalModelStatus(settings.localModel)
+      setLocalRegressionEnabled(settings.localRegressionEnabled === true)
       if (settings.proxy) setProxyStatus(settings.proxy)
       setCheckpointsEnabled(settings.checkpointsEnabled === true)
     }).catch(() => undefined)
   }, [])
+  useEffect(() => {
+    const available = agentAccounts.filter(account => account.agent === newTaskAgent)
+    if (!available.some(account => account.id === newTaskAccountId)) {
+      const preferred = localStorage.getItem(`relay-${newTaskAgent.toLowerCase()}-account`)
+      setNewTaskAccountId(available.find(account => account.id === preferred)?.id ?? available[0]?.id ?? '')
+    }
+  }, [agentAccounts, newTaskAccountId, newTaskAgent])
   useEffect(() => { if (selectedModel) localStorage.setItem('relay-codex-model', selectedModel) }, [selectedModel])
   useEffect(() => { if (selectedClaudeModel) localStorage.setItem('relay-claude-model', selectedClaudeModel) }, [selectedClaudeModel])
   useEffect(() => { if (selectedClaudeEffort) localStorage.setItem('relay-claude-effort', selectedClaudeEffort) }, [selectedClaudeEffort])
   useEffect(() => {
     let cancelled = false
-    void listClaudeModels().then(available => { if (!cancelled) setClaudeModels(available) }).catch(() => undefined)
+    void listClaudeModels(activeAgent === 'Claude' ? activeAccountId : localStorage.getItem('relay-claude-account') ?? 'claude-default').then(available => { if (!cancelled) setClaudeModels(available) }).catch(() => undefined)
     return () => { cancelled = true }
-  }, [modelsReloadKey])
+  }, [activeAccountId, activeAgent, modelsReloadKey])
   useEffect(() => { if (selectedEffort) localStorage.setItem('relay-codex-effort', selectedEffort) }, [selectedEffort])
   useEffect(() => {
     if (!selectedModelInfo || reasoningOptions.some(option => option.reasoningEffort === selectedEffort)) return
@@ -677,7 +708,7 @@ function App() {
     let cancelled = false
     const refreshModels = async () => {
       try {
-        const available = await listCodexModels()
+        const available = await listCodexModels(activeAgent === 'Codex' ? activeAccountId : localStorage.getItem('relay-codex-account') ?? 'codex-default')
         if (cancelled) return
         const initialLoad = !modelsLoaded.current
         const activeTask = tasksRef.current[activeTaskRef.current]
@@ -717,7 +748,7 @@ function App() {
       window.clearInterval(timer)
       window.removeEventListener('focus', refreshIfStale)
     }
-  }, [modelsReloadKey])
+  }, [activeAccountId, activeAgent, modelsReloadKey])
   useEffect(() => {
     const runningTasks = tasks.filter(task => task.state === 'running').length
     document.title = runningTasks ? `Relay (${runningTasks}) — Remote Coding Agents` : 'Relay — Remote Coding Agents'
@@ -745,7 +776,7 @@ function App() {
       return
     }
     codexRateLimitLoading.current = 'running'
-    void authenticatedFetch('/api/account/rate-limits').then(async response => {
+    void authenticatedFetch(`/api/account/rate-limits?accountId=${encodeURIComponent(activeAgent === 'Codex' ? activeAccountId : localStorage.getItem('relay-codex-account') ?? 'codex-default')}`).then(async response => {
       const body = await response.json() as RateLimitResponse
       if (!response.ok) return
       const limitsById = body.rateLimitsByLimitId ?? {}
@@ -756,7 +787,7 @@ function App() {
       codexRateLimitLoading.current = false
       if (rerun) loadCodexRateLimit()
     })
-  }, [])
+  }, [activeAccountId, activeAgent])
 
   const loadClaudeRateLimit = useCallback(() => {
     if (claudeRateLimitLoading.current) {
@@ -764,7 +795,7 @@ function App() {
       return
     }
     claudeRateLimitLoading.current = 'running'
-    void authenticatedFetch('/api/account/rate-limits?agent=Claude').then(async response => {
+    void authenticatedFetch(`/api/account/rate-limits?agent=Claude&accountId=${encodeURIComponent(activeAgent === 'Claude' ? activeAccountId : localStorage.getItem('relay-claude-account') ?? 'claude-default')}`).then(async response => {
       if (!response.ok) return
       const body = await response.json() as { rateLimits?: RateLimits | null }
       setClaudeRateLimit(body.rateLimits ?? null)
@@ -773,7 +804,7 @@ function App() {
       claudeRateLimitLoading.current = false
       if (rerun) loadClaudeRateLimit()
     })
-  }, [])
+  }, [activeAccountId, activeAgent])
 
   useEffect(() => {
     const loadRateLimits = () => {
@@ -866,10 +897,11 @@ function App() {
         tokenUsage?: Task['tokenUsage']
         approval?: NonNullable<Task['pendingApprovals']>[number]
         approvalId?: string
-        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; proxy?: ProxyStatus }
+        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus }
         rateLimits?: RateLimits | null
         projectId?: string
         agent?: AgentName
+        accountId?: string
         model?: string | null
         reasoningEffort?: string | null
         event?: {
@@ -895,11 +927,16 @@ function App() {
           setAutoApproveConfirmations(message.settings.autoApproveConfirmations === true)
           setAutoAcceptDefaultMcpForms(message.settings.autoAcceptDefaultMcpForms === true)
         }
-        if (message.type === 'claude_rate_limits' && message.rateLimits) setClaudeRateLimit(message.rateLimits)
-        if (message.type === 'task_agent_changed' && message.taskId && message.agent) setTasks(current => current.map(task => task.id === message.taskId ? { ...task, agent: message.agent!, color: message.agent === 'Codex' ? 'violet' : 'orange', model: message.model ?? undefined, reasoningEffort: message.reasoningEffort ?? undefined } : task))
+        if (message.type === 'claude_rate_limits' && message.rateLimits) {
+          const active = tasksRef.current[activeTaskRef.current]
+          if (!message.accountId || active?.agent !== 'Claude' || (active.accountId ?? 'claude-default') === message.accountId) setClaudeRateLimit(message.rateLimits)
+        }
+        if (message.type === 'task_agent_changed' && message.taskId && message.agent) setTasks(current => current.map(task => task.id === message.taskId ? { ...task, agent: message.agent!, accountId: message.accountId ?? task.accountId, color: message.agent === 'Codex' ? 'violet' : 'orange', model: message.model ?? undefined, reasoningEffort: message.reasoningEffort ?? undefined } : task))
         if (message.type === 'memory_changed' && message.projectId === projectId) setMemoryReloadKey(current => current + 1)
         if (message.type === 'provider_settings' && message.settings?.deepseek) {
           setDeepseekStatus(message.settings.deepseek)
+          if (message.settings.localModel) setLocalModelStatus(message.settings.localModel)
+          setLocalRegressionEnabled(message.settings.localRegressionEnabled === true)
           if (message.settings.proxy) setProxyStatus(message.settings.proxy)
           setModelsReloadKey(current => current + 1)
         }
@@ -1053,7 +1090,7 @@ function App() {
   const createTask = () => {
     if (!newTaskTitle.trim()) return
     if (newTaskAgent === 'Claude') {
-      void apiAgentService.createTask('Claude', newTaskTitle.trim(), claudeModel || undefined, claudeEffort || undefined).then(task => {
+      void apiAgentService.createTask('Claude', newTaskTitle.trim(), claudeModel || undefined, claudeEffort || undefined, newTaskAccountId).then(task => {
         setTasks(current => [task, ...current])
         setActiveTask(0)
         setNewTaskTitle('')
@@ -1067,7 +1104,7 @@ function App() {
       setSelectedEffort(effectiveEffort)
       notify(language === 'zh' ? '原模型额度已用完，已切换到 Luna' : 'The current model quota is exhausted. Switched to Luna.')
     }
-    void apiAgentService.createTask(newTaskAgent, newTaskTitle.trim(), effectiveModel || undefined, effectiveEffort || undefined).then(task => {
+    void apiAgentService.createTask(newTaskAgent, newTaskTitle.trim(), effectiveModel || undefined, effectiveEffort || undefined, newTaskAccountId).then(task => {
       setTasks(current => [task, ...current])
       setActiveTask(0)
       setNewTaskTitle('')
@@ -1076,7 +1113,7 @@ function App() {
   }
 
   const saveTaskModel = (task: Task, model: string, effort: string) => {
-    if (!task.id || !model || (!effort && task.agent !== 'Claude')) return
+    if (!task.id || !model || (!effort && task.agent !== 'Claude' && !isLocalModel(model))) return
     setTasks(current => current.map(item => item.id === task.id ? { ...item, model, reasoningEffort: effort } : item))
     void apiAgentService.updateTaskModel(task, model, effort).catch(error => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, model: task.model, reasoningEffort: task.reasoningEffort } : item))
@@ -1111,13 +1148,30 @@ function App() {
     if (agent === 'Codex' && !rateLimit) loadCodexRateLimit()
     const model = agent === 'Claude' ? claudeModel : selectedModel
     const effort = agent === 'Claude' ? claudeEffort : selectedEffort
-    void apiAgentService.switchAgent(task, agent, model || undefined, effort || undefined).then(updated => {
+    const availableAccounts = agentAccounts.filter(account => account.agent === agent)
+    const preferredAccountId = localStorage.getItem(`relay-${agent.toLowerCase()}-account`)
+    const accountId = availableAccounts.find(account => account.id === preferredAccountId)?.id ?? availableAccounts[0]?.id
+    void apiAgentService.switchAgent(task, agent, model || undefined, effort || undefined, accountId).then(updated => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, ...updated } : item))
       notify(language === 'zh' ? `已切换到 ${agent}，下一条消息会附带交接内容` : `Switched to ${agent}; your next message includes a handoff`)
     }).catch(error => notifyAgentError(error, 'Unable to switch agent'))
   }
 
-  composerActionsRef.current = { sendMessage, changeTaskModel, switchAgent }
+  const switchAccount = (accountId: string) => {
+    const task = tasks[activeTask]
+    if (!task?.id || task.accountId === accountId) return
+    const model = task.agent === 'Claude' ? claudeModel : selectedModel
+    const effort = task.agent === 'Claude' ? claudeEffort : selectedEffort
+    void apiAgentService.switchAgent(task, task.agent, model || undefined, effort || undefined, accountId).then(updated => {
+      setTasks(current => current.map(item => item.id === task.id ? { ...item, ...updated } : item))
+      localStorage.setItem(`relay-${task.agent.toLowerCase()}-account`, accountId)
+      if (newTaskAgent === task.agent) setNewTaskAccountId(accountId)
+      setModelsReloadKey(key => key + 1)
+      notify(language === 'zh' ? '账号已切换；下一条消息会继续当前任务' : 'Account switched; the next message continues this task')
+    }).catch(error => notifyAgentError(error, 'Unable to switch account'))
+  }
+
+  composerActionsRef.current = { sendMessage, changeTaskModel, switchAgent, switchAccount }
 
   const changeTaskEffort = (effort: string) => {
     const task = tasks[activeTask]
@@ -1207,28 +1261,38 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
   }
 
-  const saveProviderSettings = (change: { deepseekApiKey?: string | null; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
+  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; apiKey?: string | null } | null; localRegressionEnabled?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
+    const previousLocalRegressionEnabled = localRegressionEnabled
+    if (typeof change.localRegressionEnabled === 'boolean') setLocalRegressionEnabled(change.localRegressionEnabled)
     setDeepseekSaving(true)
     void authenticatedFetch('/api/settings/providers', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(change),
     }).then(async response => {
-      const result = await response.json() as { deepseek?: DeepSeekStatus; proxy?: ProxyStatus; checkpointsEnabled?: boolean; restartPending?: boolean; error?: string }
+      const result = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean; restartPending?: boolean; error?: string }
       if (!response.ok || !result.deepseek) throw new Error(result.error ?? 'Unable to save settings')
       setDeepseekStatus(result.deepseek)
+      if (result.localModel) setLocalModelStatus(result.localModel)
+      setLocalRegressionEnabled(result.localRegressionEnabled === true)
       setCheckpointsEnabled(result.checkpointsEnabled === true)
       if (result.proxy) setProxyStatus(result.proxy)
       if ('deepseekApiKey' in change) setDeepseekKeyDraft('')
       if ('httpProxy' in change) setProxyDraft('')
       setModelsReloadKey(current => current + 1)
       notify(result.restartPending ? (language === 'zh' ? '已保存；Codex 会在当前任务结束后应用' : 'Saved. Codex applies it after running tasks finish') : savedMessage)
-    }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save settings'))
+    }).catch(error => {
+      if (typeof change.localRegressionEnabled === 'boolean') setLocalRegressionEnabled(previousLocalRegressionEnabled)
+      notify(error instanceof Error ? error.message : 'Unable to save settings')
+    })
       .finally(() => setDeepseekSaving(false))
   }
   const saveDeepseekKey = (apiKey: string | null) => saveProviderSettings({ deepseekApiKey: apiKey }, apiKey
     ? (language === 'zh' ? 'DeepSeek API Key 已保存' : 'DeepSeek API key saved')
     : (language === 'zh' ? 'DeepSeek API Key 已清除' : 'DeepSeek API key removed'))
+  const saveLocalModel = (localModel: { name: string; baseUrl: string; model: string; apiKey?: string | null } | null) => saveProviderSettings({ localModel }, localModel
+    ? (language === 'zh' ? '本地模型 Provider 已保存' : 'Local model provider saved')
+    : (language === 'zh' ? '本地模型 Provider 已移除' : 'Local model provider removed'))
   const saveHttpProxy = (proxy: string | null) => saveProviderSettings({ httpProxy: proxy }, proxy
     ? (language === 'zh' ? '代理已保存' : 'Proxy saved')
     : (language === 'zh' ? '代理已清除' : 'Proxy removed'))
@@ -1325,6 +1389,22 @@ function App() {
   // first shared user message onward. This avoids both losing history and
   // appending duplicated older assistant replies at the end.
   const chatMessages = useMemo(() => mergeSessionTimeline(sessionHistory, activeLiveEvents).filter(message => !isExecutionLog(message)).slice(-visibleChatCount), [sessionHistory, activeLiveEvents, visibleChatCount])
+  const selectedTask = tasks[activeTask]
+  const taskControlProps: TaskControlProps | null = selectedTask ? {
+    actions: composerActionsRef,
+    agent: selectedTask.agent,
+    accounts: agentAccounts,
+    accountId: selectedTask.accountId ?? (selectedTask.agent === 'Claude' ? 'claude-default' : 'codex-default'),
+    language,
+    models: agentModels,
+    model: agentModel,
+    modelDisabled: selectedTask.state === 'running' || selectedTask.state === 'waiting_for_approval' || agentModels.length === 0,
+    agentSwitchDisabled: selectedTask.state === 'running' || selectedTask.state === 'waiting_for_approval',
+    effortOptions: agentReasoningOptions,
+    effort: agentEffort,
+    effortDisabled: selectedTask.state === 'running' || selectedTask.state === 'waiting_for_approval',
+    onEffortChange: changeTaskEffort,
+  } : null
 
   if (loading) return <div className="loading-screen">Loading local tasks…</div>
   if (!localProject) return <div className="loading-screen"><div className="empty-home"><FolderGit2 size={24} /><h1>Choose a local project</h1><p>Select a Git repository to load its local Codex session history.</p><button className="primary-btn" onClick={openProjectPicker}><Plus size={16} /> Choose project</button></div>{projectPickerOpen && <div className="modal-backdrop" onClick={() => setProjectPickerOpen(false)}><div className="modal project-picker" onClick={event => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">LOCAL PROJECT</span><h2>Choose a Git repository</h2></div><button className="icon-btn" onClick={() => setProjectPickerOpen(false)}><X size={18} /></button></div><p className="picker-path">{directory?.path ?? 'Loading…'}</p>{directory?.parent && <button className="parent-directory" onClick={() => browseDirectory(directory.parent ?? undefined)}>← Parent folder</button>}{projectPickerError && <p className="picker-error">{projectPickerError}</p>}<div className="directory-list">{directory?.items.map(item => <div className="directory-row" key={item.path}><button className="directory-open" onClick={() => browseDirectory(item.path)}><FolderGit2 size={16} /><span>{item.name}</span>{item.isGit && <small>Git repository</small>}</button>{item.isGit && <button className="secondary-btn" onClick={() => selectProject(item.path)}>Select</button>}</div>)}</div><p className="picker-hint">Choose a Git repository to load its local Codex session history.</p></div></div>}</div>
@@ -1335,6 +1415,7 @@ function App() {
     <header className="topbar">
       <div className="brand"><div className="brand-mark"><Sparkles size={16} /></div><span>relay</span><span className="brand-version">v{__RELAY_VERSION__}</span></div>
       <div className="topbar-center"><span className="connection-dot" /> {machineName} <ChevronDown size={14} /></div>
+      {activeView === 'projects' && taskControlProps && <TaskControlRow {...taskControlProps} className="task-top-controls topbar-task-controls" />}
       {activeAgent === 'Claude'
         ? claudeRateLimit && <RateLimitStatus rateLimit={claudeRateLimit} agent="Claude" language={language} />
         : rateLimit && <RateLimitStatus rateLimit={rateLimit} agent="Codex" language={language} />}
@@ -1346,18 +1427,20 @@ function App() {
         <div className="sidebar-heading"><div><span className="eyebrow">{text.workspace}</span><h2>{machineName}</h2></div><button className="icon-btn" onClick={() => notify('Machine actions will be connected to SSH')}><MoreHorizontal size={18} /></button></div>
         <div className="machine-status"><span className="connection-dot" /> {text.connected} <span className="muted">·</span> <span className="muted">Apple Silicon</span></div>
         <nav className="side-nav"><button className={`nav-item ${activeView === 'overview' ? 'active' : ''}`} onClick={showOverview}><Laptop size={16} /> {text.overview}</button><button className={`nav-item ${activeView === 'projects' ? 'active' : ''}`} onClick={() => { setActiveView('projects'); setSidebarOpen(false) }}><FolderGit2 size={16} /> {text.projects} <span className="nav-count">{workspaceProjects.length}</span></button><button className={`nav-item ${activeView === 'images' ? 'active' : ''}`} onClick={() => { setActiveView('images'); setSidebarOpen(false) }}><Images size={16} /> {language === 'zh' ? '图片' : 'Images'}</button><button className={`nav-item ${activeView === 'activity' ? 'active' : ''}`} onClick={() => { setActiveView('activity'); setSidebarOpen(false) }}><Archive size={16} /> {text.activity}</button><button className={`nav-item ${activeView === 'memory' ? 'active' : ''}`} onClick={() => { setActiveView('memory'); setSidebarOpen(false) }}><Brain size={16} /> {language === 'zh' ? '共享记忆' : 'Memory'}</button></nav>
+        <nav className="side-nav side-nav-settings"><button className={`nav-item ${activeView === 'agents' ? 'active' : ''}`} onClick={() => { setActiveView('agents'); setSidebarOpen(false) }}><Bot size={16} /> {language === 'zh' ? 'Agent 设置' : 'Agent settings'}</button></nav>
         <div className="project-label"><button className="workspace-toggle" onClick={() => setProjectsExpanded(current => !current)} aria-expanded={projectsExpanded}><ChevronDown size={14} className={projectsExpanded ? '' : 'is-collapsed'} /><span className="eyebrow">{text.workspaces}</span><span className="workspace-count">{workspaceProjects.length}</span></button><button className="tiny-add" onClick={openProjectPicker} aria-label="Add project" title="Add project"><Plus size={14} /></button></div>
         {projectsExpanded && <div className="project-list">{workspaceProjects.map(project => <div className={`project-row ${project.id === localProject?.id ? 'active' : ''}`} key={project.path}><button className="project" onClick={() => project.id === localProject?.id ? undefined : switchToProject(project)}><span className="repo-icon"><Code2 size={15} /></span><span><strong>{project.name}</strong><small>{project.branch} · {project.clean ? 'clean' : 'changed'}</small></span>{project.id === localProject?.id && <ChevronRight size={14} />}</button>{workspaceProjects.length > 1 && <button className="remove-project" onClick={() => removeProject(project)} aria-label={`Remove ${project.name}`} title="Remove workspace"><X size={13} /></button>}</div>)}</div>}
         <div className="sidebar-bottom"><div className="agent-ready"><span className="agent-icon codex">C</span><span>Codex <small>Ready</small></span><span className="ready-dot" /></div><div className="agent-ready"><span className="agent-icon claude">✦</span><span>Claude <small>Ready</small></span><span className="ready-dot" /></div></div>
       </aside>
       {sidebarOpen && <button className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} aria-label="Close workspace menu" />}
 
-      <main className={`main-content ${activeView === 'projects' ? `project-main-content${taskMaximized ? ' task-maximized' : ''}` : ''}`}>
+      <main className={`main-content${activeView === 'agents' ? ' agent-view' : ''} ${activeView === 'projects' ? `project-main-content${taskMaximized ? ' task-maximized' : ''}` : ''}`}>
         {activeView === 'overview' ? <section className="environment-page"><div className="content-header"><div className="breadcrumbs"><span className="muted">{text.overview}</span><ChevronRight size={14} /><strong>Local environment</strong></div><button className="secondary-btn" onClick={loadEnvironment}>Refresh</button></div><section className="project-hero"><div><span className="eyebrow">LOCAL AGENT SETUP</span><h1>Codex & Claude environment</h1><p className="path">Inspect the tools Relay uses on this Mac. Installation runs only when you choose it.</p></div></section>{environmentLoading && !environment ? <p className="environment-loading">Checking local tools…</p> : <><div className="environment-grid">{environment?.tools.map(tool => <article className="environment-card" key={tool.id}><div><span className="eyebrow">AI CODING AGENT</span><h2>{tool.label}</h2><p>{tool.installed ? tool.version ?? 'Installed' : 'Not installed'}</p>{tool.id === 'claude' && tool.installed && <p className="environment-detail">{tool.runtime === 'outdated' ? (language === 'zh' ? `版本过旧，Relay 需要 ${tool.requiredVersion} 或更新版本` : `Older than ${tool.requiredVersion}, the oldest version Relay supports`) : tool.loggedIn ? (language === 'zh' ? `已登录${tool.account ? `（${tool.account}）` : ''}` : `Signed in${tool.account ? ` (${tool.account})` : ''}`) : (language === 'zh' ? '未登录：在终端运行 claude 登录' : 'Not signed in: run claude in a terminal')}</p>}</div><span className={`environment-status ${tool.status ?? (tool.runtime === 'outdated' ? 'missing' : tool.installed ? 'installed' : 'missing')}`}>{tool.status === 'installing' ? 'Installing' : tool.status === 'failed' ? 'Failed' : tool.runtime === 'outdated' ? 'Outdated' : tool.installed ? 'Ready' : 'Missing'}</span>{tool.status === 'failed' && <small className="environment-error">{tool.detail}</small>}<button className={tool.installed && tool.runtime !== 'outdated' ? 'secondary-btn' : 'primary-btn'} disabled={tool.status === 'installing'} onClick={() => (!tool.installed || tool.runtime === 'outdated') && tool.id && installTool(tool.id)}>{tool.status === 'installing' ? 'Installing…' : tool.runtime === 'outdated' ? `Update ${tool.label}` : tool.installed ? 'Installed' : `Install ${tool.label}`}</button></article>)}</div><section className="environment-requirements"><span className="eyebrow">REQUIREMENTS</span>{environment?.requirements.map(item => <div key={item.label}><span>{item.label}</span><strong className={item.installed ? 'ok' : 'missing'}>{item.installed ? item.version ?? 'Ready' : 'Missing'}</strong></div>)}</section><p className="environment-note">After installation, sign in in a local terminal with <code>codex login</code> or <code>claude login</code>. Relay does not store your credentials.</p>{environmentError && <p className="environment-error">{environmentError}</p>}</>}</section> : activeView === 'memory' ? (localProject ? <MemoryPanel projectId={localProject.id} projectName={localProject.name} language={language} reloadKey={memoryReloadKey} notify={notify} /> : <section className="memory-page"><p className="environment-loading">{language === 'zh' ? '请先选择一个项目' : 'Choose a project first'}</p></section>) : activeView === 'images' ? <ProjectImagesPanel projectId={localProject.id} projectName={localProject.name} language={language} notify={notify} /> : activeView === 'activity' ? <section className="activity-page"><div className="content-header"><div className="breadcrumbs"><span className="muted">{text.workspace}</span><ChevronRight size={14} /><strong>{text.activity}</strong></div><button className="secondary-btn" onClick={() => setActivityRefresh(value => value + 1)}>Refresh</button></div><section className="project-hero"><div><span className="eyebrow">LOCAL SESSION FEED</span><h1>{text.activity}</h1><p className="path">Recent messages across tasks in {localProject?.name ?? 'this project'}.</p></div></section>{activityLoading ? <p className="environment-loading">Loading activity…</p> : activityEvents.length ? <div className="activity-feed">{activityEvents.map((event, index) => <article className={`activity-item ${event.role}`} key={`${event.taskId}-${event.createdAt}-${index}`}><div className="activity-marker"><MessageSquare size={15} /></div><div className="activity-body"><div className="activity-meta"><strong>{event.role === 'user' ? 'You' : event.role === 'progress' ? 'Codex activity' : 'Codex'}</strong><time>{formatTime(event.createdAt)}</time></div><button className="activity-task-link" onClick={() => { const index = tasks.findIndex(task => task.id === event.taskId); if (index >= 0) { setActiveTask(index); setActiveView('projects') } }}>{event.taskTitle}</button><div className="markdown-output"><ReactMarkdown remarkPlugins={[remarkGfm]}>{event.text}</ReactMarkdown></div></div></article>)}</div> : <div className="empty-tasks">No task messages yet.</div>}</section> : <>
         <div className="content-header project-content-header"><div className="breadcrumbs"><span className="muted">{text.projects}</span><ChevronRight size={14} /><strong>{localProject?.name ?? 'Local project'}</strong></div><div className="header-actions"><button className="secondary-btn" onClick={() => notify('Raw terminal needs the SSH terminal endpoint, which is not enabled yet')}><TerminalSquare size={15} /> Open terminal</button><button className="secondary-btn" onClick={() => void openDeletedTasks()}><Archive size={15} /> {language === 'zh' ? '历史记录' : 'History'}</button><button className="primary-btn" onClick={() => setNewTaskOpen(true)}><Plus size={16} /> {text.newTask}</button></div></div>
         <section className="project-hero project-page-hero"><div><div className="hero-title"><h1>{localProject?.name ?? 'Local project'}</h1><span className="repo-pill"><FolderGit2 size={13} /> Git repository</span></div><p className="path">{localProject?.path ?? ''}</p></div><div className="branch"><span className="branch-icon">⌘</span> {localProject?.branch ?? '—'} <span className="clean-dot" /> {localProject?.clean ? 'Clean' : 'Changed'}</div></section>
-        <div className="section-heading recent-task-heading"><div><span className="eyebrow">{text.projectActivity}</span><h2>{text.recentTasks}<span className="active-task-count"><span className="pulse" />{tasks.filter(task => task.state === 'running').length} {language === 'zh' ? '运行中' : 'running'}</span></h2></div><div className="recent-task-controls"><label className="recent-task-select-label"><span className="sr-only">{text.recentTasks}</span><select className="recent-task-select" value={tasks[activeTask] ? String(activeTask) : ''} onChange={event => { const index = Number(event.target.value); if (Number.isInteger(index)) activateTask(index) }} aria-label={text.recentTasks}><option value="" disabled>{language === 'zh' ? '选择任务' : 'Select a task'}</option>{taskSelectOptions.map(({ task, index, selected }) => <option key={`${task.id}-${index}`} value={index}>{selected ? (language === 'zh' ? '已选择 · ' : 'Selected · ') : `${statusLabel(task.state)} · `}{task.title}</option>)}</select><ChevronDown size={14} /></label><button className={`filter ${taskSearchOpen ? 'active' : ''}`} onClick={() => setTaskSearchOpen(current => !current)} aria-label={text.searchTasks} title={text.searchTasks}><Search size={15} /><span>{text.searchTasks}</span></button></div></div>
+        <div className="section-heading recent-task-heading"><div><span className="eyebrow">{text.projectActivity}</span><h2>{text.recentTasks}<span className="active-task-count"><span className="pulse" />{tasks.filter(task => task.state === 'running').length} {language === 'zh' ? '运行中' : 'running'}</span></h2></div><div className="recent-task-controls"><label className="recent-task-select-label" title={tasks[activeTask]?.title}><span className="sr-only">{text.recentTasks}</span><select className="recent-task-select desktop-task-select" value={tasks[activeTask] ? String(activeTask) : ''} onChange={event => { const index = Number(event.target.value); if (Number.isInteger(index)) activateTask(index) }} aria-label={text.recentTasks}><option value="" disabled>{language === 'zh' ? '选择任务' : 'Select a task'}</option>{taskSelectOptions.map(({ task, index, selected }) => <option key={`${task.id}-${index}`} value={index}>{taskOptionLabel(task, selected)}</option>)}</select><select className="recent-task-select mobile-task-select" value={tasks[activeTask] ? String(activeTask) : ''} onChange={event => { const index = Number(event.target.value); if (Number.isInteger(index)) activateTask(index) }} aria-label={language === 'zh' ? '选择任务（精简名称）' : 'Select a task (short names)'}><option value="" disabled>{language === 'zh' ? '选择任务' : 'Select a task'}</option>{taskSelectOptions.map(({ task, index, selected }) => <option key={`${task.id}-${index}`} value={index}>{taskOptionLabel(task, selected, true)}</option>)}</select><ChevronDown size={14} /></label><button className={`filter ${taskSearchOpen ? 'active' : ''}`} onClick={() => setTaskSearchOpen(current => !current)} aria-label={text.searchTasks} title={text.searchTasks}><Search size={15} /><span>{text.searchTasks}</span></button></div></div>
         {taskSearchOpen && <div className="task-search"><Search size={15} /><input autoFocus value={taskQuery} onChange={event => setTaskQuery(event.target.value)} placeholder={text.searchTasks} /><button onClick={() => { setTaskQuery(''); setTaskSearchOpen(false) }} aria-label="Close search"><X size={15} /></button></div>}
+        {activeView === 'projects' && taskControlProps && <TaskControlRow {...taskControlProps} className="task-top-controls mobile-task-controls" />}
         <div className="task-preview-workspace" ref={executionWorkspaceRef}>
             {!executionLogsCollapsed && <><button className="execution-log-backdrop" onClick={collapseExecutionLogs} aria-label={language === 'zh' ? '关闭执行日志' : 'Close execution logs'} /><aside ref={executionLogSidebarRef} className="execution-log-sidebar" style={{ width: executionLogWidth }}><ExecutionLogPanel key={activeTaskId} logs={activeExecutionLogs} taskState={tasks[activeTask].state} language={language} onCollapse={collapseExecutionLogs} /></aside><div className="execution-log-resize" role="separator" tabIndex={0} aria-valuemin={220} aria-valuemax={Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2)} aria-valuenow={executionLogWidth} aria-orientation="vertical" aria-label={language === 'zh' ? '调整日志栏宽度' : 'Resize execution log panel'} onPointerDown={event => { resizingExecutionLogs.current = true; pendingExecutionLogWidth.current = executionLogWidth; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={event => { if (resizingExecutionLogs.current) resizeExecutionLogsTo(event.clientX) }} onPointerUp={event => finishExecutionLogResize(event.clientX)} onPointerCancel={() => finishExecutionLogResize()} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); const maxWidth = Math.floor((executionWorkspaceRef.current?.clientWidth ?? window.innerWidth) / 2); setExecutionLogWidth(width => Math.max(220, Math.min(maxWidth, width + (event.key === 'ArrowRight' ? 16 : -16)))) }} /> </>}
             <div className="task-preview">
@@ -1365,12 +1448,12 @@ function App() {
             <div className="preview-agent"><span className={`task-agent ${tasks[activeTask].color}`}>{tasks[activeTask].agent === 'Codex' ? 'C' : '✦'}</span><span>{tasks[activeTask].agent}</span><span className={`status-badge ${tasks[activeTask].state}`}>{tasks[activeTask].state === 'running' ? <><span className="worker-animation" role="img" aria-label="Agent is working">🧑‍🔧<span>🔨</span></span> {statusLabel(tasks[activeTask].state)}</> : statusLabel(tasks[activeTask].state)}</span><TaskDuration task={tasks[activeTask]} language={language} />{tasks[activeTask].handoffTokens ? <span className="handoff-tokens" title={language === 'zh' ? '交接内容和检查点规则的估算 token' : 'Estimated tokens for handoffs and checkpoint rules'}>{language === 'zh' ? '交接' : 'Handoff'} ~{tasks[activeTask].handoffTokens.toLocaleString()} tokens</span> : null}</div>
             {(tasks[activeTask].pendingApprovals ?? []).map(approval => <ApprovalCard key={approval.id} approval={approval} agent={tasks[activeTask].agent} language={language} onRespond={response => respondToApproval(tasks[activeTask], approval.id, response)} />)}
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} hasOlder={historyCursor != null} loadingOlder={historyLoading} onLoadOlder={loadOlderTaskHistory} />
-            {agentReasoningOptions.length > 0 && <div className="reasoning-control"><label htmlFor="turn-effort">Reasoning level</label><select id="turn-effort" value={agentEffort} disabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onChange={event => changeTaskEffort(event.target.value)} title={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' ? 'The current turn is already using its selected level' : 'Choose a reasoning level for the next turn'}>{agentReasoningOptions.map(option => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}</select><span>Applies to the next turn</span></div>}
             {tasks[activeTask].state === 'failed' && <div className="agent-switch-banner"><span>{language === 'zh' ? `${tasks[activeTask].agent} 没能完成这一轮（例如额度用完）。可以换另一个 Agent 接着做，进度会自动交接。` : `${tasks[activeTask].agent} could not finish this turn (for example, a usage limit). Another agent can continue with a handoff.`}</span><button className="primary-btn" onClick={() => switchAgent(tasks[activeTask].agent === 'Codex' ? 'Claude' : 'Codex')}>{language === 'zh' ? `切换到 ${tasks[activeTask].agent === 'Codex' ? 'Claude' : 'Codex'} 继续` : `Continue with ${tasks[activeTask].agent === 'Codex' ? 'Claude' : 'Codex'}`}</button></div>}
             {sent && <div className="sent-note"><span className="pulse" /> Message sent to {tasks[activeTask].agent}</div>}
-            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} disabled={activeQuotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={activeQuotaExhausted} quotaModel={agentModel || (language === 'zh' ? '当前模型' : 'Current model')} language={language} models={agentModels} model={agentModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || agentModels.length === 0} agentSwitchDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} sendHint={text.sendHint} />
+            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} accounts={agentAccounts} accountId={tasks[activeTask].accountId ?? (tasks[activeTask].agent === 'Claude' ? 'claude-default' : 'codex-default')} disabled={activeQuotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={activeQuotaExhausted} quotaModel={agentModel || (language === 'zh' ? '当前模型' : 'Current model')} language={language} models={agentModels} model={agentModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || agentModels.length === 0} agentSwitchDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} effortOptions={agentReasoningOptions} effort={agentEffort} effortDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onEffortChange={changeTaskEffort} sendHint={text.sendHint} />
             </div>
         </div></>}
+        {activeView === 'agents' && <AgentSettingsPage accounts={agentAccounts} language={language} onAccountsChanged={setAgentAccounts} onUseAccount={account => { setNewTaskAgent(account.agent); setNewTaskAccountId(account.id); localStorage.setItem(`relay-${account.agent.toLowerCase()}-account`, account.id); setModelsReloadKey(key => key + 1); notify(language === 'zh' ? `新任务将使用 ${account.name}` : `New tasks will use ${account.name}`) }} deepseekStatus={deepseekStatus} deepseekKeyDraft={deepseekKeyDraft} onDeepseekKeyDraftChange={setDeepseekKeyDraft} onSaveDeepseekKey={saveDeepseekKey} localModelStatus={localModelStatus} onSaveLocalModel={saveLocalModel} localRegressionEnabled={localRegressionEnabled} onLocalRegressionChange={enabled => saveProviderSettings({ localRegressionEnabled: enabled }, enabled ? (language === 'zh' ? '已开启本地提交前回归' : 'Local pre-commit regression enabled') : (language === 'zh' ? '已关闭本地提交前回归' : 'Local pre-commit regression disabled'))} providerSaving={deepseekSaving} checkpointsEnabled={checkpointsEnabled} onCheckpointsChange={enabled => saveProviderSettings({ checkpointsEnabled: enabled }, enabled ? (language === 'zh' ? '已开启交接检查点' : 'Handoff checkpoints on') : (language === 'zh' ? '已关闭交接检查点' : 'Handoff checkpoints off'))} />}
       </main>
     </div>
     {recoverTasksModal}
