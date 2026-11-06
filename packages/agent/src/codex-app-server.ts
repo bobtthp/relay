@@ -11,9 +11,12 @@ const codexBinary = process.env.CODEX_BIN ?? 'codex'
 export type CodexLaunchOptions = () => { env: NodeJS.ProcessEnv; configOverrides: string[] }
 
 /** Per-thread settings Relay applies on both thread/start and thread/resume, so resumed threads match new ones. */
-export type CodexThreadOptions = { modelProvider?: string; developerInstructions?: string; writableRoots?: string[] }
+export type CodexThreadOptions = { model?: string; modelProvider?: string; developerInstructions?: string; writableRoots?: string[] }
+
+const appServerModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'gpt-reserve' : model
 
 const threadParams = (options: CodexThreadOptions = {}) => ({
+  ...(options.model ? { model: appServerModel(options.model) } : {}),
   ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}),
   ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
   ...(options.writableRoots?.length ? { config: { sandbox_workspace_write: { writable_roots: options.writableRoots } } } : {}),
@@ -114,7 +117,7 @@ export class CodexAppServer {
     // Luna is the display model for the reserve quota, but the app-server
     // route must use the hidden reserve model id. Sending gpt-5.6-luna or
     // gpt-6-luna directly uses the regular model quota and can be rejected.
-    const explicitModel = model?.toLowerCase().includes('luna') ? 'gpt-reserve' : model
+    const explicitModel = appServerModel(model)
     await this.request('turn/start', { threadId, cwd, ...(explicitModel ? { model: explicitModel } : {}), ...(effort ? { effort } : {}), ...(sandboxPolicy ? { sandboxPolicy } : {}), input: [{ type: 'text', text }] })
   }
   async steerTurn(threadId: string, turnId: string, text: string) { await this.ensureStarted(); await this.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] }) }
@@ -140,7 +143,7 @@ export class CodexAppServer {
    */
   async runOneShot(cwd: string, prompt: string, options: { model?: string; modelProvider?: string; developerInstructions: string }) {
     await this.ensureStarted()
-    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions, ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}) })
+    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions, ...(options.model ? { model: appServerModel(options.model) } : {}), ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}) })
     const threadId = (result.thread as { id?: string } | undefined)?.id
     if (!threadId) throw new Error('Codex app-server did not return a thread id')
     let text = ''

@@ -7,6 +7,8 @@ import {
   localModelCatalog,
   localModelId,
   localModelProviderOverrides,
+  modelProviderChanged,
+  modelProviderId,
   normalizeLocalModelUrl,
   providerSettingsStatus,
 } from './provider-settings.js'
@@ -38,4 +40,14 @@ test('uses an internal model prefix while preserving the provider model id', () 
   assert.equal(model.model, 'relay-local:qwen2.5-coder:7b')
   assert.equal(isLocalModel(model.model), true)
   assert.equal(localModelId(model.model), 'qwen2.5-coder:7b')
+})
+
+test('detects model provider transitions that require a new thread', () => {
+  assert.equal(modelProviderId('gpt-6.1-sol'), 'openai')
+  assert.equal(modelProviderId('deepseek-flash'), 'deepseek')
+  assert.equal(modelProviderId('relay-local:qwen2.5-coder:7b'), 'relay-local')
+  assert.equal(modelProviderChanged('relay-local:qwen2.5-coder:7b', 'openai'), true)
+  assert.equal(modelProviderChanged('gpt-6.1-sol', 'relay-local'), true)
+  assert.equal(modelProviderChanged('gpt-6.1-sol', undefined), false)
+  assert.equal(modelProviderChanged('relay-local:qwen2.5-coder:7b', 'relay-local'), false)
 })

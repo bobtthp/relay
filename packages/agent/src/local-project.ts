@@ -1,7 +1,6 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 
 const dataDirectory = process.env.RELAY_DATA_DIR ?? path.join(os.homedir(), '.relay-web')
 const selectionPath = path.join(dataDirectory, 'selected-project.json')
@@ -9,10 +8,28 @@ const homeDirectory = os.homedir()
 
 export type DirectoryEntry = { name: string; path: string; isGit: boolean }
 
-export const isGitRepository = (directory: string) => {
-  try { return execFileSync('git', ['-C', directory, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() === 'true' }
-  catch { return false }
+export type GitRepositoryLocation = { workTree: string; gitDirectory: string }
+
+export const gitRepositoryLocation = (directory: string): GitRepositoryLocation | undefined => {
+  try {
+    let current = path.resolve(directory)
+    if (!fs.statSync(current).isDirectory()) return undefined
+    while (true) {
+      const marker = path.join(current, '.git')
+      if (fs.existsSync(marker)) {
+        const gitDirectory = fs.statSync(marker).isDirectory()
+          ? marker
+          : path.resolve(current, fs.readFileSync(marker, 'utf8').trim().replace(/^gitdir:\s*/, ''))
+        return { workTree: current, gitDirectory }
+      }
+      const parent = path.dirname(current)
+      if (parent === current) return undefined
+      current = parent
+    }
+  } catch { return undefined }
 }
+
+export const isGitRepository = (directory: string) => Boolean(gitRepositoryLocation(directory))
 
 export function selectedProjectPath() {
   try {

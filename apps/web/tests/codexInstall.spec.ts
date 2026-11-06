@@ -185,6 +185,13 @@ test('uploads a temporary project image and creates a collaborative link', async
   await page.locator('.image-drop-zone input').setInputFiles(path.resolve('en.jpg'))
   await expect(page.getByText('/tmp/relay/uploads/project-ci/uploaded.jpg')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Copy path' })).toBeVisible()
+  await page.getByRole('button', { name: 'Preview uploaded.jpg' }).click()
+  await expect(page.getByRole('dialog', { name: 'Image preview' })).toBeVisible()
+  await expect(page.locator('.image-lightbox-preview img')).toHaveCSS('object-fit', 'contain')
+  await page.getByRole('dialog', { name: 'Image preview' }).getByRole('button', { name: 'Copy path' }).click()
+  await expect(page.getByText('Copy failed. Select the text manually.')).toBeHidden()
+  await page.getByRole('button', { name: 'Close preview' }).click()
+  await expect(page.getByRole('dialog', { name: 'Image preview' })).toBeHidden()
 
   await page.getByRole('button', { name: 'Create upload link' }).click()
   await expect(page.locator('.image-share-link code')).toContainText('/upload/test-share-token')

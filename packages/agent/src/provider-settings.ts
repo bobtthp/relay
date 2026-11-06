@@ -59,6 +59,10 @@ export const deepseekModels = [
 export const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
 export const isLocalModel = (model?: string) => model?.startsWith(LOCAL_MODEL_PREFIX) === true
 export const localModelId = (model?: string) => isLocalModel(model) ? model!.slice(LOCAL_MODEL_PREFIX.length) : model
+export const modelProviderId = (model?: string) => isDeepSeekModel(model)
+  ? DEEPSEEK_PROVIDER_ID
+  : isLocalModel(model) ? LOCAL_MODEL_PROVIDER_ID : 'openai'
+export const modelProviderChanged = (model: string | undefined, threadProvider?: string) => modelProviderId(model) !== (threadProvider ?? 'openai')
 
 const tomlString = (value: string) => JSON.stringify(value)
 

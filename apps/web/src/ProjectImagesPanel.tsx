@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Copy, Image as ImageIcon, Link2, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react'
+import { Copy, Image as ImageIcon, Link2, Maximize2, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react'
 import { authenticatedFetch } from './services/auth'
 
 type ProjectImage = { name: string; path: string; size: number; mimeType: string; createdAt: string; previewUrl: string }
@@ -35,6 +35,7 @@ export function ProjectImagesPanel({ projectId, projectName, language, notify }:
   const [uploading, setUploading] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
+  const [previewImage, setPreviewImage] = useState<ProjectImage | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
@@ -54,6 +55,12 @@ export function ProjectImagesPanel({ projectId, projectName, language, notify }:
   }, [projectId])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (!previewImage) return
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setPreviewImage(null) }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [previewImage])
 
   const uploadFiles = async (files: File[]) => {
     const invalid = files.find(file => !acceptedImageTypes.has(file.type) || file.size > 10 * 1024 * 1024)
@@ -78,8 +85,23 @@ export function ProjectImagesPanel({ projectId, projectName, language, notify }:
   }
 
   const copy = async (value: string, message: string) => {
-    try { await navigator.clipboard.writeText(value); notify(message) }
-    catch { setError(language === 'zh' ? '复制失败，请手动选择文本' : 'Copy failed. Select the text manually.') }
+    try {
+      try { await navigator.clipboard.writeText(value) }
+      catch {
+        const input = document.createElement('textarea')
+        input.value = value
+        input.setAttribute('readonly', '')
+        input.style.position = 'fixed'
+        input.style.opacity = '0'
+        document.body.appendChild(input)
+        let copied = false
+        try { input.select(); copied = document.execCommand('copy') }
+        finally { input.remove() }
+        if (!copied) throw new Error('Copy unavailable')
+      }
+      setError('')
+      notify(message)
+    } catch { setError(language === 'zh' ? '复制失败，请手动选择文本' : 'Copy failed. Select the text manually.') }
   }
 
   const updateShare = async () => {
@@ -130,8 +152,9 @@ export function ProjectImagesPanel({ projectId, projectName, language, notify }:
     {error && <p className="images-error">{error}</p>}
     <div className="images-list-header"><div><span className="eyebrow">{language === 'zh' ? '已上传' : 'UPLOADED'}</span><h2>{language === 'zh' ? '项目图片' : 'Project images'} <small>{images.length}</small></h2></div></div>
     {loading ? <p className="environment-loading">{language === 'zh' ? '正在加载图片…' : 'Loading images…'}</p> : images.length ? <div className="image-grid">{images.map(image => <article className="image-card" key={image.name}>
-      <div className="image-preview"><ImagePreview image={image} /></div>
+      <button className="image-preview image-preview-button" onClick={() => setPreviewImage(image)} aria-label={language === 'zh' ? `预览 ${image.name}` : `Preview ${image.name}`}><ImagePreview image={image} /><span className="image-preview-hint"><Maximize2 size={14} /> {language === 'zh' ? '查看原图' : 'View image'}</span></button>
       <div className="image-card-body"><strong title={image.name}>{image.name}</strong><small>{(image.size / 1024).toFixed(image.size < 1024 * 100 ? 1 : 0)} KB · {new Date(image.createdAt).toLocaleString()}</small><code title={image.path}>{image.path}</code><div className="image-card-actions"><button className="secondary-btn" onClick={() => void copy(image.path, language === 'zh' ? '本地路径已复制' : 'Local path copied')}><Copy size={13} /> {language === 'zh' ? '复制路径' : 'Copy path'}</button><button className="icon-btn image-delete" onClick={() => void removeImage(image)} aria-label={language === 'zh' ? '删除图片' : 'Delete image'}><Trash2 size={14} /></button></div></div>
     </article>)}</div> : <div className="images-empty"><ImageIcon size={26} /><strong>{language === 'zh' ? '还没有图片' : 'No images yet'}</strong><span>{language === 'zh' ? '从本页或协作上传页添加图片。' : 'Add images here or from the shared upload page.'}</span></div>}
+    {previewImage && <div className="image-lightbox" role="dialog" aria-modal="true" aria-label={language === 'zh' ? '图片预览' : 'Image preview'} onClick={() => setPreviewImage(null)}><div className="image-lightbox-card" onClick={event => event.stopPropagation()}><div className="image-lightbox-header"><div><span className="eyebrow">{language === 'zh' ? '图片预览' : 'IMAGE PREVIEW'}</span><strong>{previewImage.name}</strong></div><div className="image-lightbox-actions"><button className="secondary-btn" onClick={() => void copy(previewImage.path, language === 'zh' ? '本地路径已复制' : 'Local path copied')}><Copy size={14} /> {language === 'zh' ? '复制路径' : 'Copy path'}</button><button className="icon-btn" onClick={() => setPreviewImage(null)} aria-label={language === 'zh' ? '关闭预览' : 'Close preview'}><X size={19} /></button></div></div><div className="image-lightbox-preview"><ImagePreview image={previewImage} /></div><code>{previewImage.path}</code></div></div>}
   </section>
 }

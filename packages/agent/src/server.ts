@@ -19,7 +19,7 @@ import { listDirectories, removeSavedProject, saveSelectedProject, validateProje
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
 import { buildHandoff, checkpointDirectory, checkpointRule } from './handoff.js'
 import { MemoryConflictError, MemoryWatcher, applyConsolidation, consolidationInstructions, consolidationPrompt, discardConsolidation, memoryStats, parseConsolidationPlan, readConsolidation, storeConsolidationProposal, claudeMemoryPromptAppend, codexMemoryInstructions, deleteMemoryEntry, estimateTokens, memoryPrimer, importClaudeMemories, listMemoryEntries, memoryDirectory, previewClaudeImport, readMemoryAudit, readMemoryIndex, readMemorySettings, rollbackClaudeImport, setMemoryEnabled, touchesMemory, writeMemoryEntry } from './project-memory.js'
-import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
+import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 import { deleteProjectImage, listProjectImages, projectImagePath, saveProjectImage } from './project-images.js'
 import { createProjectImageShare, deleteProjectImageShare, projectIdForImageShare, projectImageShare } from './project-image-shares.js'
 import { agentAccount, agentAccountEnvironment, agentAccountLoginCommand, createAgentAccount, deleteAgentAccount, listAgentAccounts } from './agent-accounts.js'
@@ -69,22 +69,27 @@ const codexClients = new Map<string, CodexAppServer>()
 const claudeClients = new Map<string, ClaudeRunner>()
 const accountForTask = (task: { agent: AgentName; accountId?: string }) => agentAccount(task.accountId, task.agent)
 const codexHomeForTask = (task: { accountId?: string }) => agentAccount(task.accountId, 'Codex')?.configDirectory
-const codexForAccount = (accountId?: string) => {
+const codexClientKey = (accountId: string, provider: string) => `${accountId}\u0000${provider}`
+const codexForAccount = (accountId?: string, provider = 'openai') => {
   const account = agentAccount(accountId, 'Codex')
   if (!account) throw new Error('Codex account not found')
-  let client = codexClients.get(account.id)
+  const clientKey = codexClientKey(account.id, provider)
+  let client = codexClients.get(clientKey)
   if (client) return client
   client = new CodexAppServer(() => {
     const deepseekKey = effectiveDeepSeekKey(providerSettings)
     const localKey = providerSettings.localModel?.apiKey
+    const providerOverrides = provider === 'openai'
+      ? []
+      : [`model_provider=${JSON.stringify(provider)}`, ...(provider === LOCAL_MODEL_PROVIDER_ID && providerSettings.localModel ? [`model=${JSON.stringify(providerSettings.localModel.model)}`] : [])]
     return {
       env: { ...agentAccountEnvironment(account), ...proxyEnvironment(providerSettings), ...(deepseekKey ? { [DEEPSEEK_ENV_KEY]: deepseekKey } : {}), ...(localKey ? { [LOCAL_MODEL_ENV_KEY]: localKey } : {}) },
-      configOverrides: [...deepseekProviderOverrides, ...localModelProviderOverrides(providerSettings)],
+      configOverrides: [...deepseekProviderOverrides, ...localModelProviderOverrides(providerSettings), ...providerOverrides],
     }
   })
   client.onServerRequest(message => handleCodexServerRequest(client!, account.id, message))
   client.onNotification(message => handleCodexNotification(account.id, message))
-  codexClients.set(account.id, client)
+  codexClients.set(clientKey, client)
   return client
 }
 const claudeForAccount = (accountId?: string) => {
@@ -97,7 +102,7 @@ const claudeForAccount = (accountId?: string) => {
   claudeClients.set(account.id, client)
   return client
 }
-const codexForTask = (task: { accountId?: string }) => codexForAccount(task.accountId)
+const codexForTask = (task: { accountId?: string; model?: string; modelProvider?: string }) => codexForAccount(task.accountId, task.model ? modelProviderId(task.model) : task.modelProvider ?? 'openai')
 const claudeForTask = (task: { accountId?: string }) => claudeForAccount(task.accountId)
 const codex = codexForAccount()
 const claude = claudeForAccount()
@@ -109,13 +114,13 @@ const restartCodexWhenIdle = () => {
   codexRestartPending = false
   for (const client of codexClients.values()) client.restart()
 }
-// Threads keep the provider they were started with, so switching between a
-// DeepSeek model and a ChatGPT model must name the provider on resume.
+// Threads keep the provider they were started with, so provider changes must
+// either resume with the same provider or migrate the conversation to a new thread.
 const modelProviderForTask = (task: { model?: string; modelProvider?: string }) => isDeepSeekModel(task.model)
   ? DEEPSEEK_PROVIDER_ID
   : isLocalModel(task.model) ? LOCAL_MODEL_PROVIDER_ID
   : task.modelProvider === DEEPSEEK_PROVIDER_ID || task.modelProvider === LOCAL_MODEL_PROVIDER_ID ? 'openai' : undefined
-const rememberModelProvider = (task: typeof tasks[number]) => { task.modelProvider = isDeepSeekModel(task.model) ? DEEPSEEK_PROVIDER_ID : isLocalModel(task.model) ? LOCAL_MODEL_PROVIDER_ID : undefined }
+const rememberModelProvider = (task: typeof tasks[number]) => { task.modelProvider = modelProviderId(task.model) }
 const turnModelForTask = (task: { model?: string }) => localModelId(task.model)
 // Shared memory is applied on thread/start and thread/resume alike, so a
 // resumed thread sees the same memory as a new one.
@@ -139,7 +144,7 @@ const codexThreadOptions = (task: { model?: string; modelProvider?: string }, pr
     newThreadFor.memorySession = memoryDirectory(projectPath)
   }
   const writableRoots = relayWritableRoots(projectPath)
-  return { modelProvider: modelProviderForTask(task), ...(developerInstructions ? { developerInstructions } : {}), ...(writableRoots.length ? { writableRoots } : {}) }
+  return { model: turnModelForTask(task), modelProvider: modelProviderForTask(task), ...(developerInstructions ? { developerInstructions } : {}), ...(writableRoots.length ? { writableRoots } : {}) }
 }
 /**
  * thread/resume ignores writable_roots for an existing thread, so a thread that
@@ -507,14 +512,25 @@ const getDefaultMcpFormResponse = (requestedSchema: Record<string, unknown> | un
   return { action: 'accept', content, _meta: null }
 }
 
-const isThreadNotFound = (error: unknown) => error instanceof Error && /thread\s+not\s+found|unknown\s+thread/i.test(error.message)
+const isThreadNotFound = (error: unknown) => error instanceof Error && /thread\s+not\s+found|unknown\s+thread|no rollout found for thread/i.test(error.message)
+const isThreadProviderMismatch = (error: unknown) => error instanceof Error && /chat uses .+current provider|switch to .+to continue/i.test(error.message)
+
+const taskTranscript = (task: typeof tasks[number]) => {
+  const sessionIds = [task.remoteSessionId, ...(task.remoteSessionAliases ?? []).slice().reverse()].filter((id): id is string => Boolean(id))
+  for (const sessionId of sessionIds) {
+    const history = readCodexSessionHistory(sessionId, codexHomeForTask(task))
+    if (history.length) return { sessionId, history }
+  }
+  return undefined
+}
 
 const restoreThreadFromLocalTranscript = async (task: typeof tasks[number], projectPath: string) => {
   const codex = codexForTask(task)
   const previousThreadId = task.remoteSessionId
   if (!previousThreadId) throw new Error('This task has no Codex session to restore')
-  const history = readCodexSessionHistory(previousThreadId, codexHomeForTask(task))
-  if (!history.length) throw new Error(`Codex could not find thread ${previousThreadId}, and no local transcript is available to restore`)
+  const transcript = taskTranscript(task)
+  const history = transcript?.history ?? []
+  const transcriptThreadId = transcript?.sessionId ?? previousThreadId
   let remainingCharacters = 120_000
   const selectedHistory: typeof history = []
   for (const message of history.slice(-40).reverse()) {
@@ -526,8 +542,8 @@ const restoreThreadFromLocalTranscript = async (task: typeof tasks[number], proj
   const items = selectedHistory.map(message => ({ type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.text }] }))
   const restoredThreadId = await codex.startThread(projectPath, codexThreadOptions({ model: task.model }, projectPath, task))
   rememberModelProvider(task)
-  await codex.injectItems(restoredThreadId, items)
-  task.remoteSessionAliases = [...new Set([...(task.remoteSessionAliases ?? []), previousThreadId])]
+  if (items.length) await codex.injectItems(restoredThreadId, items)
+  task.remoteSessionAliases = [...new Set([...(task.remoteSessionAliases ?? []), previousThreadId, transcriptThreadId])]
   assignRemoteSession(task, restoredThreadId)
   task.activeTurnId = undefined
   task.status = 'running'
@@ -538,22 +554,69 @@ const restoreThreadFromLocalTranscript = async (task: typeof tasks[number], proj
     id: `event-${randomUUID()}`,
     taskId: task.id,
     type: 'assistant_message',
-    payload: { text: `Relay could not reopen the original Codex thread (${previousThreadId}). I restored the recent user/assistant text into a new thread so you can continue. Tool-call state and non-text context were not migrated.`, logType: 'warning' },
+    payload: { text: transcript
+      ? `Relay could not reopen the original Codex thread (${previousThreadId}). I restored recent user/assistant text from ${transcriptThreadId} into a new thread so you can continue. Tool-call state and non-text context were not migrated.`
+      : `Relay could not reopen the original Codex thread (${previousThreadId}) and it had no completed transcript. I started a clean thread so the current message can continue.`, logType: 'warning' },
     sequence: 0,
     createdAt: new Date().toISOString(),
   })
   return restoredThreadId
 }
 
+/** Codex threads are provider-bound. Preserve recent text in a new thread when the selected model crosses providers. */
+const migrateThreadToSelectedProvider = async (task: typeof tasks[number], projectPath: string) => {
+  const codex = codexForTask(task)
+  const previousThreadId = task.remoteSessionId
+  if (!previousThreadId) throw new Error('This task has no Codex session to migrate')
+  const transcript = taskTranscript(task)
+  const history = transcript?.history ?? []
+  let remainingCharacters = 120_000
+  const selectedHistory: typeof history = []
+  for (const message of history.slice(-40).reverse()) {
+    if (remainingCharacters <= 0) break
+    const text = message.text.slice(-Math.min(8_000, remainingCharacters))
+    remainingCharacters -= text.length
+    if (text) selectedHistory.unshift({ role: message.role, text })
+  }
+  const threadId = await codex.startThread(projectPath, codexThreadOptions(task, projectPath, task))
+  const items = selectedHistory.map(message => ({ type: 'message', role: message.role, content: [{ type: message.role === 'user' ? 'input_text' : 'output_text', text: message.text }] }))
+  if (items.length) await codex.injectItems(threadId, items)
+  task.remoteSessionAliases = [...new Set([...(task.remoteSessionAliases ?? []), previousThreadId, ...(transcript ? [transcript.sessionId] : [])])]
+  assignRemoteSession(task, threadId)
+  rememberModelProvider(task)
+  task.activeTurnId = undefined
+  persist(task.projectId)
+  broadcast({ type: 'task_session_started', taskId: task.id, sessionId: threadId, restoredFrom: previousThreadId })
+  appendEvent({
+    id: `event-${randomUUID()}`,
+    taskId: task.id,
+    type: 'assistant_message',
+    payload: { text: `Relay started a new Codex session for the ${task.modelProvider} provider and migrated the recent conversation text.`, method: 'relay/provider-switch', logType: 'status' },
+    sequence: 0,
+    createdAt: new Date().toISOString(),
+  })
+  return threadId
+}
+
 const resumeOrRestoreThread = async (task: typeof tasks[number], projectPath: string, prompt: string) => {
   const codex = codexForTask(task)
-  const threadId = task.remoteSessionId
+  let threadId = task.remoteSessionId
   if (!threadId) throw new Error('This task has no Codex session to resume')
+  if (modelProviderChanged(task.model, task.modelProvider)) {
+    threadId = await migrateThreadToSelectedProvider(task, projectPath)
+    await codex.startTurn(threadId, withMemoryPrimer(task, projectPath, prompt), projectPath, turnModelForTask(task), task.reasoningEffort)
+    return
+  }
   try {
     const resumed = await codex.resumeThread(threadId, projectPath, codexThreadOptions(task, projectPath))
     rememberModelProvider(task)
     await codex.startTurn(threadId, withMemoryPrimer(task, projectPath, prompt), projectPath, turnModelForTask(task), task.reasoningEffort, memorySandboxPolicy(resumed, projectPath))
   } catch (error) {
+    if (isThreadProviderMismatch(error)) {
+      const migratedThreadId = await migrateThreadToSelectedProvider(task, projectPath)
+      await codex.startTurn(migratedThreadId, withMemoryPrimer(task, projectPath, prompt), projectPath, turnModelForTask(task), task.reasoningEffort)
+      return
+    }
     if (!isThreadNotFound(error)) throw error
     const restoredThreadId = await restoreThreadFromLocalTranscript(task, projectPath)
     await codex.startTurn(restoredThreadId, prompt, projectPath, turnModelForTask(task), task.reasoningEffort)
@@ -670,7 +733,7 @@ const runLocalRegression = (task: typeof tasks[number]): Promise<LocalRegression
     }
     let review
     try {
-      const output = await codex.runOneShot(projectPath, regressionReviewPrompt(results), {
+      const output = await codexForAccount(task.agent === 'Codex' ? task.accountId : undefined, LOCAL_MODEL_PROVIDER_ID).runOneShot(projectPath, regressionReviewPrompt(results), {
         model: local.model,
         modelProvider: LOCAL_MODEL_PROVIDER_ID,
         developerInstructions: 'You are Relay\'s local pre-commit regression reviewer. Use no tools. Judge only the supplied deterministic results and return the requested JSON object.',
@@ -1156,8 +1219,7 @@ app.post('/api/agent-accounts', (request, response) => {
 app.delete('/api/agent-accounts/:accountId', (request, response) => {
   if (tasks.some(task => task.accountId === request.params.accountId || Object.values(task.agentSessions ?? {}).some(session => session.accountId === request.params.accountId))) return response.status(409).json({ error: 'This account is used by a task and cannot be removed' })
   try {
-    codexClients.get(request.params.accountId)?.stop()
-    codexClients.delete(request.params.accountId)
+    for (const [key, client] of codexClients) if (key.startsWith(`${request.params.accountId}\u0000`)) { client.stop(); codexClients.delete(key) }
     claudeClients.get(request.params.accountId)?.stopAll()
     claudeClients.delete(request.params.accountId)
     deleteAgentAccount(request.params.accountId)

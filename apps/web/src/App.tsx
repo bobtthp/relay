@@ -1291,8 +1291,8 @@ function App() {
     ? (language === 'zh' ? 'DeepSeek API Key 已保存' : 'DeepSeek API key saved')
     : (language === 'zh' ? 'DeepSeek API Key 已清除' : 'DeepSeek API key removed'))
   const saveLocalModel = (localModel: { name: string; baseUrl: string; model: string; apiKey?: string | null } | null) => saveProviderSettings({ localModel }, localModel
-    ? (language === 'zh' ? '本地模型 Provider 已保存' : 'Local model provider saved')
-    : (language === 'zh' ? '本地模型 Provider 已移除' : 'Local model provider removed'))
+    ? (language === 'zh' ? '自定义模型 Provider 已保存' : 'Custom model provider saved')
+    : (language === 'zh' ? '自定义模型 Provider 已移除' : 'Custom model provider removed'))
   const saveHttpProxy = (proxy: string | null) => saveProviderSettings({ httpProxy: proxy }, proxy
     ? (language === 'zh' ? '代理已保存' : 'Proxy saved')
     : (language === 'zh' ? '代理已清除' : 'Proxy removed'))
