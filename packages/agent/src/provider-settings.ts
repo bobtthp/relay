@@ -11,7 +11,7 @@ export type ProviderSettings = {
     model: string
     apiKey?: string
   }
-  /** Gate git commit approvals on deterministic checks reviewed by the configured local model. */
+  /** Gate git commit approvals on deterministic checks reviewed by the configured custom model. */
   localRegressionEnabled?: boolean
   /** HTTP(S) proxy for agent traffic. Background services do not inherit a shell's proxy variables. */
   httpProxy?: string
@@ -65,9 +65,7 @@ const tomlString = (value: string) => JSON.stringify(value)
 export function normalizeLocalModelUrl(value: string) {
   try {
     const url = new URL(value.trim())
-    const hostname = url.hostname.toLowerCase()
-    const loopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
-    if (url.protocol !== 'http:' || !loopback || url.username || url.password || url.search || url.hash) return undefined
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !url.hostname || url.username || url.password || url.search || url.hash) return undefined
     const pathname = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '')
     return `${url.protocol}//${url.host}${pathname}`
   } catch { return undefined }
@@ -93,7 +91,7 @@ export function localModelCatalog(settings: ProviderSettings) {
     id: `${LOCAL_MODEL_PREFIX}${local.model}`,
     model: `${LOCAL_MODEL_PREFIX}${local.model}`,
     displayName: `${local.name} · ${local.model}`,
-    description: `Local Responses API at ${local.baseUrl}`,
+    description: `Custom Responses API at ${local.baseUrl}`,
     provider: LOCAL_MODEL_PROVIDER_ID,
   }]
 }

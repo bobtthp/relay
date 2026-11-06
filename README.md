@@ -210,20 +210,21 @@ To use DeepSeek models in Codex tasks, enter a DeepSeek API key in Settings.
 stores the key only on this Mac and configures the provider itself; you do not
 need to edit `~/.codex/config.toml`.
 
-## Local models
+## Custom model providers
 
-Open **Agent settings → Local model** to add a model served from this Mac.
-Enter a loopback Base URL such as `http://127.0.0.1:11434/v1`, the model ID,
-and an optional API key. The model then appears in the Codex model selector;
-Relay keeps Codex as the tool and approval runtime while inference stays on the
-configured local endpoint. The endpoint must implement the Responses API at
-`/responses`; a Chat Completions-only server is not sufficient.
+Open **Agent settings → Custom model provider** to add a model served locally,
+on the LAN, or by a remote service. Enter any HTTP or HTTPS Base URL, the model
+ID, and an optional API key. Use HTTPS for remote services so the key is not
+sent in cleartext. The model then appears in the Codex model selector; Relay
+keeps Codex as the tool and approval runtime while inference uses the configured
+endpoint. It must implement the Responses API at `/responses`; a Chat
+Completions-only server is not sufficient.
 
-Enable **Delegate pre-commit regression locally** in the same card to gate an
+Enable **Delegate pre-commit regression to this provider** in the same card to gate an
 agent's `git commit` command. Relay runs the repository's shared `ci-local`
 entry when present, otherwise its standard check, test, build, and UI install
-scripts. The local model reviews the bounded result. A failed command, invalid
-model verdict, unavailable local endpoint, or changed worktree snapshot blocks
+scripts. The configured model reviews the bounded result. A failed command, invalid
+model verdict, unavailable provider endpoint, or changed worktree snapshot blocks
 the commit request.
 
 ## Network proxy

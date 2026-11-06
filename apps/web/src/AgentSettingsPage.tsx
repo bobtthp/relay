@@ -28,12 +28,12 @@ export function AgentSettingsPage({
   onCheckpointsChange: (enabled: boolean) => void
 }) {
   const zh = language === 'zh'
-  const [localName, setLocalName] = useState('Local model')
+  const [localName, setLocalName] = useState('Custom model')
   const [localBaseUrl, setLocalBaseUrl] = useState('http://127.0.0.1:11434/v1')
   const [localModel, setLocalModel] = useState('')
   const [localApiKey, setLocalApiKey] = useState('')
   useEffect(() => {
-    setLocalName(localModelStatus.name ?? 'Local model')
+    setLocalName(localModelStatus.name ?? 'Custom model')
     setLocalBaseUrl(localModelStatus.baseUrl ?? 'http://127.0.0.1:11434/v1')
     setLocalModel(localModelStatus.model ?? '')
     setLocalApiKey('')
@@ -51,7 +51,7 @@ export function AgentSettingsPage({
         {deepseekStatus.source === 'relay' && <button className="secondary-btn provider-key-clear" disabled={providerSaving} onClick={() => onSaveDeepseekKey(null)}>{zh ? '清除 Key' : 'Remove key'}</button>}
         <p className="auto-approval-help provider-help">{zh ? '仅保存在本机 ~/.relay-web。' : 'Stored only on this Mac in ~/.relay-web.'}</p>
       </div>
-      <div className="agent-settings-card agent-settings-local-model"><div className="agent-settings-card-heading"><Server size={17} /><div><h2>{zh ? '本地模型' : 'Local model'}</h2><p>{zh ? '通过 Codex 连接本机的 Responses API。' : 'Connect Codex to a Responses API running on this Mac.'}</p></div></div>
+      <div className="agent-settings-card agent-settings-local-model"><div className="agent-settings-card-heading"><Server size={17} /><div><h2>{zh ? '自定义模型 Provider' : 'Custom model provider'}</h2><p>{zh ? '通过 Codex 连接本机、局域网或远程的 Responses API。' : 'Connect Codex to a local, LAN, or remote Responses API.'}</p></div></div>
         <p className="provider-status">{localModelStatus.configured ? (zh ? `已配置 ${localModelStatus.name} · ${localModelStatus.model}` : `Configured ${localModelStatus.name} · ${localModelStatus.model}`) : (zh ? '尚未配置' : 'Not configured')}</p>
         <form className="local-provider-form" onSubmit={event => { event.preventDefault(); if (localName.trim() && localBaseUrl.trim() && localModel.trim()) onSaveLocalModel({ name: localName.trim(), baseUrl: localBaseUrl.trim(), model: localModel.trim(), ...(localApiKey.trim() ? { apiKey: localApiKey.trim() } : {}) }) }}>
           <label>{zh ? '名称' : 'Name'}<input value={localName} maxLength={80} onChange={event => setLocalName(event.target.value)} placeholder="Ollama" /></label>
@@ -61,8 +61,8 @@ export function AgentSettingsPage({
           <button className="secondary-btn" type="submit" disabled={providerSaving || !localName.trim() || !localBaseUrl.trim() || !localModel.trim()}>{zh ? '保存 Provider' : 'Save provider'}</button>
         </form>
         <div className="local-provider-actions">{localModelStatus.keyHint && <button className="secondary-btn" disabled={providerSaving} onClick={() => onSaveLocalModel({ name: localName.trim(), baseUrl: localBaseUrl.trim(), model: localModel.trim(), apiKey: null })}>{zh ? '清除 Key' : 'Remove key'}</button>}{localModelStatus.configured && <button className="secondary-btn provider-key-clear" disabled={providerSaving} onClick={() => onSaveLocalModel(null)}>{zh ? '移除 Provider' : 'Remove provider'}</button>}</div>
-        <p className="auto-approval-help">{zh ? '只允许 localhost、127.0.0.1 或 ::1 的 HTTP 地址。服务必须实现 /responses；Ollama 或 LM Studio 需开启兼容的 Responses API。' : 'Only HTTP URLs on localhost, 127.0.0.1, or ::1 are accepted. The service must implement /responses; enable a compatible Responses API in Ollama or LM Studio.'}</p>
-        <div className="local-regression-setting"><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={localRegressionEnabled} disabled={providerSaving || !localModelStatus.configured} onChange={event => onLocalRegressionChange(event.target.checked)} /><span>{zh ? '提交前自动委派本地回归' : 'Delegate pre-commit regression locally'}</span></label><p className="auto-approval-help">{zh ? 'Agent 请求 git commit 时，Relay 会以当前本机用户权限运行仓库的 ci-local 入口；没有共用入口时依次运行 check、test、build 和已配置的 UI 安装测试，再由本地模型审核结果。只应在你信任的仓库中开启。失败、模型不可用或代码快照变化都会阻止提交。' : 'When an agent requests git commit, Relay runs the repository ci-local entry with your local user permissions; without one it runs check, test, build, and the configured UI install test, then asks the local model to review the result. Enable this only for repositories you trust. Failures, an unavailable model, or a changed snapshot block the commit.'}</p></div>
+        <p className="auto-approval-help">{zh ? '支持任意 HTTP 或 HTTPS 地址，但远程服务建议使用 HTTPS，避免 API Key 明文传输。服务必须实现 /responses；仅兼容 Chat Completions 的端点无法使用。' : 'Any HTTP or HTTPS URL is supported, but remote services should use HTTPS so API keys are not sent in cleartext. The service must implement /responses; Chat Completions-only endpoints are not supported.'}</p>
+        <div className="local-regression-setting"><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={localRegressionEnabled} disabled={providerSaving || !localModelStatus.configured} onChange={event => onLocalRegressionChange(event.target.checked)} /><span>{zh ? '提交前委派回归给此 Provider' : 'Delegate pre-commit regression to this provider'}</span></label><p className="auto-approval-help">{zh ? 'Agent 请求 git commit 时，Relay 会以当前本机用户权限运行仓库的 ci-local 入口；没有共用入口时依次运行 check、test、build 和已配置的 UI 安装测试，再由此模型审核结果。只应在你信任的仓库中开启。失败、模型不可用或代码快照变化都会阻止提交。' : 'When an agent requests git commit, Relay runs the repository ci-local entry with your local user permissions; without one it runs check, test, build, and the configured UI install test, then asks this model to review the result. Enable this only for repositories you trust. Failures, an unavailable model, or a changed snapshot block the commit.'}</p></div>
       </div>
       <div className="agent-settings-card"><div className="agent-settings-card-heading"><Workflow size={17} /><div><h2>{zh ? '交接检查点' : 'Handoff checkpoints'}</h2><p>{zh ? '切换 Agent 时让后续 Agent 获取更完整的进度。' : 'Give the next agent a fuller progress note when switching.'}</p></div></div>
         <label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={checkpointsEnabled} disabled={providerSaving} onChange={event => onCheckpointsChange(event.target.checked)} /><span>{zh ? '让 Agent 记录进度检查点' : 'Agents keep a progress checkpoint'}</span></label>

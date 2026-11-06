@@ -656,7 +656,7 @@ const runLocalRegression = (task: typeof tasks[number]): Promise<LocalRegression
   if (existing) return existing
   const run = (async () => {
     const local = providerSettings.localModel
-    if (!local) return { passed: false, summary: 'No local model provider is configured.', steps: [] }
+    if (!local) return { passed: false, summary: 'No custom model provider is configured.', steps: [] }
     const steps = discoverRegressionSteps(projectPath)
     if (!steps.length) return { passed: false, summary: 'Relay could not find a shared CI entry or supported project checks.', steps: [] }
     const before = await projectSnapshot(projectPath)
@@ -677,9 +677,9 @@ const runLocalRegression = (task: typeof tasks[number]): Promise<LocalRegression
       })
       review = parseRegressionVerdict(output.text)
     } catch (error) {
-      return { passed: false, summary: `Local model review failed: ${error instanceof Error ? error.message : String(error)}`, steps: results }
+      return { passed: false, summary: `Custom model review failed: ${error instanceof Error ? error.message : String(error)}`, steps: results }
     }
-    if (!review) return { passed: false, summary: 'The local model returned an invalid regression verdict.', steps: results }
+    if (!review) return { passed: false, summary: 'The custom model returned an invalid regression verdict.', steps: results }
     const after = await projectSnapshot(projectPath)
     if (before !== after) return { passed: false, summary: 'The project changed while local regression was running; run it again for the new snapshot.', steps: results }
     const commandsPassed = results.length === steps.length && results.every(result => result.passed)
@@ -1212,12 +1212,12 @@ app.put('/api/settings/providers', (request, response) => {
       const name = typeof local.name === 'string' ? local.name.trim() : ''
       const model = typeof local.model === 'string' ? local.model.trim() : ''
       const baseUrl = typeof local.baseUrl === 'string' ? normalizeLocalModelUrl(local.baseUrl) : undefined
-      if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/.test(name)) return response.status(400).json({ error: 'Enter a valid local provider name' })
-      if (!model || model.length > 160 || !/^[A-Za-z0-9._:/-]+$/.test(model)) return response.status(400).json({ error: 'Enter a valid local model ID' })
-      if (!baseUrl) return response.status(400).json({ error: 'Enter a loopback HTTP URL such as http://127.0.0.1:11434/v1' })
+      if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/.test(name)) return response.status(400).json({ error: 'Enter a valid custom provider name' })
+      if (!model || model.length > 160 || !/^[A-Za-z0-9._:/-]+$/.test(model)) return response.status(400).json({ error: 'Enter a valid custom model ID' })
+      if (!baseUrl) return response.status(400).json({ error: 'Enter an HTTP or HTTPS Responses API URL such as https://models.example.com/v1' })
       if ('apiKey' in local && local.apiKey !== null && typeof local.apiKey !== 'string') return response.status(400).json({ error: 'localModel.apiKey must be a string or null' })
       const apiKey = typeof local.apiKey === 'string' ? local.apiKey.trim() : local.apiKey === null ? '' : next.localModel?.apiKey
-      if (apiKey && (apiKey.length > 512 || /\s/.test(apiKey))) return response.status(400).json({ error: 'Enter a valid local provider API key' })
+      if (apiKey && (apiKey.length > 512 || /\s/.test(apiKey))) return response.status(400).json({ error: 'Enter a valid custom provider API key' })
       next.localModel = { name, model, baseUrl, ...(apiKey ? { apiKey } : {}) }
     }
   }
@@ -1226,7 +1226,7 @@ app.put('/api/settings/providers', (request, response) => {
     else delete next.checkpointsEnabled
   }
   if (typeof body.localRegressionEnabled === 'boolean') {
-    if (body.localRegressionEnabled && !next.localModel) return response.status(400).json({ error: 'Configure a local model provider before enabling local regression' })
+    if (body.localRegressionEnabled && !next.localModel) return response.status(400).json({ error: 'Configure a custom model provider before enabling delegated regression' })
     if (body.localRegressionEnabled) next.localRegressionEnabled = true
     else delete next.localRegressionEnabled
   }

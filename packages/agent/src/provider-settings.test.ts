@@ -11,14 +11,15 @@ import {
   providerSettingsStatus,
 } from './provider-settings.js'
 
-test('normalizes only loopback HTTP model endpoints', () => {
+test('normalizes HTTP and HTTPS custom model endpoints', () => {
   assert.equal(normalizeLocalModelUrl(' http://127.0.0.1:11434/v1/ '), 'http://127.0.0.1:11434/v1')
   assert.equal(normalizeLocalModelUrl('http://localhost:1234/v1'), 'http://localhost:1234/v1')
   assert.equal(normalizeLocalModelUrl('http://[::1]:8080/v1'), 'http://[::1]:8080/v1')
-  assert.equal(normalizeLocalModelUrl('https://localhost:1234/v1'), undefined)
-  assert.equal(normalizeLocalModelUrl('http://192.168.1.5:11434/v1'), undefined)
+  assert.equal(normalizeLocalModelUrl('https://models.example.com/v1/'), 'https://models.example.com/v1')
+  assert.equal(normalizeLocalModelUrl('http://192.168.1.5:11434/v1'), 'http://192.168.1.5:11434/v1')
   assert.equal(normalizeLocalModelUrl('http://user:secret@localhost:1234/v1'), undefined)
   assert.equal(normalizeLocalModelUrl('http://localhost:1234/v1?token=secret'), undefined)
+  assert.equal(normalizeLocalModelUrl('ftp://models.example.com/v1'), undefined)
 })
 
 test('builds a Responses provider without exposing its API key in arguments or status', () => {
