@@ -743,7 +743,7 @@ button, input, select, textarea { font-family:var(--font-ui); font-size:var(--ty
 .agent-settings-card > .auto-approval-help { margin-bottom:0; }
 .local-provider-form { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; margin-top:12px; }
 .local-provider-form label { display:grid; gap:6px; margin:0; color:#8b95a5; font-size:10px; }
-.local-provider-form input { width:100%; min-width:0; padding:8px 9px; border:1px solid #303849; border-radius:6px; outline:0; background:#10151c; color:#e1e5ec; font-size:11px; }
+.local-provider-form select, .local-provider-form input { width:100%; min-width:0; padding:8px 9px; border:1px solid #303849; border-radius:6px; outline:0; background:#10151c; color:#e1e5ec; font-size:11px; }
 .local-provider-form input:focus { border-color:#6d58c8; }
 .local-provider-form > button { grid-column:1 / -1; justify-content:center; }
 .local-provider-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }

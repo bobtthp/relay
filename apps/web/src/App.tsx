@@ -40,7 +40,7 @@ const isLunaModel = (model: string | Pick<CodexModel, 'model' | 'displayName'> |
   return value.toLowerCase().includes('luna')
 }
 type DeepSeekStatus = { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
-type LocalModelStatus = { configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null }
+type LocalModelStatus = { agent?: 'Codex' | 'Claude'; configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null; contextWindow: number | null; autoCompactTokenLimit: number | null }
 type ProxyStatus = { url: string | null; systemProxy: string | null }
 type EnvironmentItem = { id?: 'codex' | 'claude'; label: string; installed: boolean; version?: string; status?: 'installing' | 'failed'; detail?: string; runtime?: 'local' | 'outdated' | 'missing'; loggedIn?: boolean; requiredVersion?: string; account?: string }
 type CompletionSound = 'chime' | 'bell' | 'digital'
@@ -360,7 +360,7 @@ function App() {
   const [autoAcceptDefaultMcpForms, setAutoAcceptDefaultMcpForms] = useState(false)
   const [deepseekStatus, setDeepseekStatus] = useState<DeepSeekStatus>({ configured: false, source: null, keyHint: null })
   const [deepseekKeyDraft, setDeepseekKeyDraft] = useState('')
-  const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus>({ configured: false, name: null, baseUrl: null, model: null, keyHint: null })
+  const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus>({ configured: false, name: null, baseUrl: null, model: null, keyHint: null, contextWindow: null, autoCompactTokenLimit: null })
   const [localRegressionEnabled, setLocalRegressionEnabled] = useState(false)
   const [deepseekSaving, setDeepseekSaving] = useState(false)
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ url: null, systemProxy: null })
@@ -1261,7 +1261,7 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
   }
 
-  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; apiKey?: string | null } | null; localRegressionEnabled?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
+  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null; localRegressionEnabled?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
     const previousLocalRegressionEnabled = localRegressionEnabled
     if (typeof change.localRegressionEnabled === 'boolean') setLocalRegressionEnabled(change.localRegressionEnabled)
     setDeepseekSaving(true)
@@ -1290,7 +1290,7 @@ function App() {
   const saveDeepseekKey = (apiKey: string | null) => saveProviderSettings({ deepseekApiKey: apiKey }, apiKey
     ? (language === 'zh' ? 'DeepSeek API Key 已保存' : 'DeepSeek API key saved')
     : (language === 'zh' ? 'DeepSeek API Key 已清除' : 'DeepSeek API key removed'))
-  const saveLocalModel = (localModel: { name: string; baseUrl: string; model: string; apiKey?: string | null } | null) => saveProviderSettings({ localModel }, localModel
+  const saveLocalModel = (localModel: { agent: 'Codex' | 'Claude'; name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null) => saveProviderSettings({ localModel }, localModel
     ? (language === 'zh' ? '自定义模型 Provider 已保存' : 'Custom model provider saved')
     : (language === 'zh' ? '自定义模型 Provider 已移除' : 'Custom model provider removed'))
   const saveHttpProxy = (proxy: string | null) => saveProviderSettings({ httpProxy: proxy }, proxy

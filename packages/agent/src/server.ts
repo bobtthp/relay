@@ -19,7 +19,7 @@ import { listDirectories, removeSavedProject, saveSelectedProject, validateProje
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
 import { buildHandoff, checkpointDirectory, checkpointRule } from './handoff.js'
 import { MemoryConflictError, MemoryWatcher, applyConsolidation, consolidationInstructions, consolidationPrompt, discardConsolidation, memoryStats, parseConsolidationPlan, readConsolidation, storeConsolidationProposal, claudeMemoryPromptAppend, codexMemoryInstructions, deleteMemoryEntry, estimateTokens, memoryPrimer, importClaudeMemories, listMemoryEntries, memoryDirectory, previewClaudeImport, readMemoryAudit, readMemoryIndex, readMemorySettings, rollbackClaudeImport, setMemoryEnabled, touchesMemory, writeMemoryEntry } from './project-memory.js'
-import { DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
+import { localClaudeEnvironment, localModelContextOverrides, validContextTokens, DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 import { deleteProjectImage, listProjectImages, projectImagePath, saveProjectImage } from './project-images.js'
 import { createProjectImageShare, deleteProjectImageShare, projectIdForImageShare, projectImageShare } from './project-image-shares.js'
 import { agentAccount, agentAccountEnvironment, agentAccountLoginCommand, createAgentAccount, deleteAgentAccount, listAgentAccounts } from './agent-accounts.js'
@@ -81,7 +81,7 @@ const codexForAccount = (accountId?: string, provider = 'openai') => {
     const localKey = providerSettings.localModel?.apiKey
     const providerOverrides = provider === 'openai'
       ? []
-      : [`model_provider=${JSON.stringify(provider)}`, ...(provider === LOCAL_MODEL_PROVIDER_ID && providerSettings.localModel ? [`model=${JSON.stringify(providerSettings.localModel.model)}`] : [])]
+      : [`model_provider=${JSON.stringify(provider)}`, ...(provider === LOCAL_MODEL_PROVIDER_ID && providerSettings.localModel ? [`model=${JSON.stringify(providerSettings.localModel.model)}`, ...localModelContextOverrides(providerSettings)] : [])]
     return {
       env: { ...agentAccountEnvironment(account), ...proxyEnvironment(providerSettings), ...(deepseekKey ? { [DEEPSEEK_ENV_KEY]: deepseekKey } : {}), ...(localKey ? { [LOCAL_MODEL_ENV_KEY]: localKey } : {}) },
       configOverrides: [...deepseekProviderOverrides, ...localModelProviderOverrides(providerSettings), ...providerOverrides],
@@ -92,18 +92,22 @@ const codexForAccount = (accountId?: string, provider = 'openai') => {
   codexClients.set(clientKey, client)
   return client
 }
-const claudeForAccount = (accountId?: string) => {
+const claudeForAccount = (accountId?: string, custom = false) => {
   const account = agentAccount(accountId, 'Claude')
   if (!account) throw new Error('Claude account not found')
-  let client = claudeClients.get(account.id)
+  const clientKey = `${account.id}:${custom ? 'local' : 'official'}`
+  let client = claudeClients.get(clientKey)
   if (client) return client
-  client = new ClaudeRunner(() => ({ ...agentAccountEnvironment(account), ...proxyEnvironment(providerSettings) }))
+  client = new ClaudeRunner(() => {
+    if (custom && providerSettings.localModel?.agent !== 'Claude') throw new Error('Configure a Claude custom provider before starting this model')
+    return { ...agentAccountEnvironment(account), ...proxyEnvironment(providerSettings), ...(custom ? localClaudeEnvironment(providerSettings) : {}) }
+  })
   client.onRateLimits(rateLimits => broadcast({ type: 'claude_rate_limits', accountId: account.id, rateLimits }))
-  claudeClients.set(account.id, client)
+  claudeClients.set(clientKey, client)
   return client
 }
 const codexForTask = (task: { accountId?: string; model?: string; modelProvider?: string }) => codexForAccount(task.accountId, task.model ? modelProviderId(task.model) : task.modelProvider ?? 'openai')
-const claudeForTask = (task: { accountId?: string }) => claudeForAccount(task.accountId)
+const claudeForTask = (task: { accountId?: string; model?: string }) => claudeForAccount(task.accountId, isLocalModel(task.model))
 const codex = codexForAccount()
 const claude = claudeForAccount()
 // Codex reads provider keys from its environment at launch, so a changed key
@@ -733,7 +737,9 @@ const runLocalRegression = (task: typeof tasks[number]): Promise<LocalRegression
     }
     let review
     try {
-      const output = await codexForAccount(task.agent === 'Codex' ? task.accountId : undefined, LOCAL_MODEL_PROVIDER_ID).runOneShot(projectPath, regressionReviewPrompt(results), {
+      const output = local.agent === 'Claude'
+        ? await claudeForAccount(task.agent === 'Claude' ? task.accountId : undefined, true).runOneShot(regressionReviewPrompt(results), { model: local.model, systemPrompt: 'Review only the supplied deterministic results. Use no tools. Return the requested JSON object.' })
+        : await codexForAccount(task.agent === 'Codex' ? task.accountId : undefined, LOCAL_MODEL_PROVIDER_ID).runOneShot(projectPath, regressionReviewPrompt(results), {
         model: local.model,
         modelProvider: LOCAL_MODEL_PROVIDER_ID,
         developerInstructions: 'You are Relay\'s local pre-commit regression reviewer. Use no tools. Judge only the supplied deterministic results and return the requested JSON object.',
@@ -945,7 +951,7 @@ const startClaudeTurn = (task: typeof tasks[number], prompt: string, projectPath
     task.memorySession = memory.directory
   }
   const turnPrompt = task.remoteSessionId && primer ? withMemoryPrimer(task, projectPath, prompt) : prompt
-  claude.start(task.id, turnPrompt, { cwd: projectPath, resume: task.remoteSessionId, model: task.model, effort: task.reasoningEffort, memory, writableDirectories }, {
+  claude.start(task.id, turnPrompt, { cwd: projectPath, resume: task.remoteSessionId, model: turnModelForTask(task), effort: task.reasoningEffort, memory, writableDirectories }, {
     onSessionId: sessionId => {
       if (task.remoteSessionId === sessionId) return
       assignRemoteSession(task, sessionId)
@@ -1074,19 +1080,6 @@ function handleCodexNotification(accountId: string, message: RpcMessage) {
       const changes = normalizeFileChanges(item.changes)
       const text = formatFileChangeProgress(changes)
       if (text || !completed) upsertProgressEvent(task.id, item.id, text || progress, completed ? 'completed' : 'running', 'change')
-    } else if (item.type === 'agentMessage' && completed) {
-      // Local or non-streaming models deliver text as aggregatedOutput on
-      // item/completed instead of item/agentMessage/delta. Emit it as a
-      // conversation message so the UI shows it in the chat, not the log.
-      const output = typeof item.aggregatedOutput === 'string' ? item.aggregatedOutput.trim() : ''
-      if (output) appendEvent({
-        id: `event-${randomUUID()}`,
-        taskId: task.id,
-        type: 'assistant_message',
-        payload: { text: output, method: 'item/agentMessage/delta', itemId: typeof item.id === 'string' ? item.id : undefined },
-        sequence: 0,
-        createdAt: new Date().toISOString(),
-      })
     } else if (progress) {
       const exitCode = typeof item.exitCode === 'number' ? item.exitCode : undefined
       const command = typeof item.command === 'string' ? item.command : ''
@@ -1149,7 +1142,15 @@ function handleCodexNotification(accountId: string, message: RpcMessage) {
   }
   const delta = typeof params.delta === 'string' ? params.delta : undefined
   const itemId = typeof params.itemId === 'string' ? params.itemId : typeof item?.id === 'string' ? item.id : undefined
-  if (delta) appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text: delta, method: message.method, itemId }, sequence: 0, createdAt: new Date().toISOString() })
+  if (delta) {
+    // Some OpenAI-compatible local models put user-facing commentary in a
+    // reasoning summary channel. Keep OpenAI reasoning in the execution log,
+    // but surface the local model's commentary in the conversation.
+    const method = isLocalModel(task.model) && message.method === 'item/reasoning/summaryTextDelta'
+      ? 'relay/localModel/messageDelta'
+      : message.method
+    appendEvent({ id: `event-${randomUUID()}`, taskId: task.id, type: 'assistant_message', payload: { text: delta, method, itemId }, sequence: 0, createdAt: new Date().toISOString() })
+  }
 }
 
 const webRoot = resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../dist/web')
@@ -1284,16 +1285,23 @@ app.put('/api/settings/providers', (request, response) => {
     else {
       const local = asRecord(body.localModel)
       if (!local) return response.status(400).json({ error: 'localModel must be an object or null' })
+      if (local.agent !== undefined && local.agent !== 'Claude' && local.agent !== 'Codex') return response.status(400).json({ error: 'localModel.agent must be Claude or Codex' })
+      const agent = local.agent ?? 'Claude'
       const name = typeof local.name === 'string' ? local.name.trim() : ''
       const model = typeof local.model === 'string' ? local.model.trim() : ''
       const baseUrl = typeof local.baseUrl === 'string' ? normalizeLocalModelUrl(local.baseUrl) : undefined
       if (!name || name.length > 80 || /[\u0000-\u001f\u007f]/.test(name)) return response.status(400).json({ error: 'Enter a valid custom provider name' })
       if (!model || model.length > 160 || !/^[A-Za-z0-9._:/-]+$/.test(model)) return response.status(400).json({ error: 'Enter a valid custom model ID' })
-      if (!baseUrl) return response.status(400).json({ error: 'Enter an HTTP or HTTPS Responses API URL such as https://models.example.com/v1' })
+      if (!baseUrl) return response.status(400).json({ error: 'Enter an HTTP or HTTPS API URL such as https://models.example.com/v1' })
       if ('apiKey' in local && local.apiKey !== null && typeof local.apiKey !== 'string') return response.status(400).json({ error: 'localModel.apiKey must be a string or null' })
       const apiKey = typeof local.apiKey === 'string' ? local.apiKey.trim() : local.apiKey === null ? '' : next.localModel?.apiKey
       if (apiKey && (apiKey.length > 512 || /\s/.test(apiKey))) return response.status(400).json({ error: 'Enter a valid custom provider API key' })
-      next.localModel = { name, model, baseUrl, ...(apiKey ? { apiKey } : {}) }
+      const contextWindow = local.contextWindow
+      const autoCompactTokenLimit = local.autoCompactTokenLimit
+      if (contextWindow != null && !validContextTokens(contextWindow)) return response.status(400).json({ error: "Invalid context window" })
+      if (autoCompactTokenLimit != null && !validContextTokens(autoCompactTokenLimit)) return response.status(400).json({ error: "Invalid auto-compaction threshold" })
+      if (contextWindow != null && autoCompactTokenLimit != null && autoCompactTokenLimit >= contextWindow) return response.status(400).json({ error: "Auto-compaction threshold must be less than the context window" })
+      next.localModel = { agent, name, model, baseUrl, ...(apiKey ? { apiKey } : {}), ...(contextWindow != null ? { contextWindow } : {}), ...(autoCompactTokenLimit != null ? { autoCompactTokenLimit } : {}) }
     }
   }
   if (typeof body.checkpointsEnabled === 'boolean') {
@@ -1358,8 +1366,9 @@ app.get('/api/account/rate-limits', async (request, response) => {
 app.get('/api/models', async (request, response) => {
   const accountId = typeof request.query.accountId === 'string' ? request.query.accountId : undefined
   if (request.query.agent === 'Claude') {
-    try { return response.json({ items: await claudeForAccount(accountId).listModels() }) }
-    catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to load Claude models' }) }
+    const customModels = localModelCatalog(providerSettings, 'Claude')
+    try { return response.json({ items: [...await claudeForAccount(accountId).listModels(), ...customModels] }) }
+    catch (error) { if (customModels.length) return response.json({ items: customModels }); return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to load Claude models' }) }
   }
   const extraModels = [...(providerSettingsStatus(providerSettings).deepseek.configured ? deepseekModels : []), ...localModelCatalog(providerSettings)]
   try { return response.json({ items: [...await codexForAccount(accountId).listModels(), ...extraModels] }) }
@@ -1840,6 +1849,7 @@ app.patch('/api/tasks/:taskId/model', (request, response) => {
   const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : ''
   if (!model || model.length > 200) return response.status(400).json({ error: 'A valid model is required' })
   if ((!reasoningEffort && task.agent !== 'Claude' && !isLocalModel(model)) || reasoningEffort.length > 100) return response.status(400).json({ error: 'A valid reasoning level is required' })
+  if (task.agent === 'Claude' && model !== task.model) claudeForTask(task).release(task.id)
   task.model = model
   task.reasoningEffort = reasoningEffort || undefined
   persist(task.projectId)
@@ -1865,7 +1875,7 @@ app.patch('/api/tasks/:taskId/agent', async (request, response) => {
   const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : undefined
   if (agent === task.agent && nextAccount.id === (accountForTask(task)?.id)) return response.json(task)
   if (agent === 'Claude') {
-    try { await claudeForAccount(nextAccount.id).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+    try { await claudeForAccount(nextAccount.id, isLocalModel(model)).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
   }
   const lastSequence = eventSequences.get(task.id) ?? 0
   const sessions = { ...(task.agentSessions ?? {}) }
@@ -1908,7 +1918,7 @@ app.post('/api/projects/:projectId/tasks', async (request, response) => {
   if (!title) return response.status(400).json({ error: 'Task title is required' })
   if (!account) return response.status(400).json({ error: `${agent} account not found` })
   if (agent === 'Claude') {
-    try { await claudeForAccount(account.id).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+    try { await claudeForAccount(account.id, isLocalModel(model)).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
   }
 
   const now = new Date().toISOString()
@@ -1927,10 +1937,11 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
   if (!task) return response.status(404).json({ error: 'Task not found' })
   if (!message) return response.status(400).json({ error: 'Message is required' })
   if (task.agent === 'Claude' && !claudeForTask(task).isActive(task.id)) {
-    try { await claudeForTask(task).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
+    try { await claudeForTask({ ...task, model: model || task.model }).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
   }
 
   const event: SessionEvent = { id: `event-${randomUUID()}`, taskId: task.id, type: 'user_message', payload: { text: message }, sequence: 0, createdAt: new Date().toISOString() }
+  if (model && model !== task.model && task.agent === 'Claude') claudeForTask(task).release(task.id)
   if (model) task.model = model
   if (reasoningEffort) task.reasoningEffort = reasoningEffort
   appendEvent(event)

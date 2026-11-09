@@ -5,7 +5,30 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { listTaskEvents } from '../src/services/apiAgentService.js'
-import { mergeEventSnapshots, mergeSessionTimeline } from '../src/services/chatTranscript.js'
+import { isFinalAssistantMessage, mergeEventSnapshots, mergeSessionTimeline } from '../src/services/chatTranscript.js'
+
+test('treats local-model commentary as a conversation message without reclassifying OpenAI reasoning', () => {
+  assert.equal(isFinalAssistantMessage('relay/localModel/messageDelta'), true)
+  assert.equal(isFinalAssistantMessage('item/agentMessage/delta'), true)
+  assert.equal(isFinalAssistantMessage('item/reasoning/summaryTextDelta'), false)
+})
+
+test('merges local-model word fragments into one conversation message', async () => {
+  const items = [
+    { id: 'local-1', taskId: 'task-local', type: 'assistant_message', createdAt: '2026-01-01T00:00:01Z', payload: { text: '我先', method: 'relay/localModel/messageDelta', itemId: 'local-item' } },
+    { id: 'local-2', taskId: 'task-local', type: 'assistant_message', createdAt: '2026-01-01T00:00:02Z', payload: { text: '检查项目。', method: 'relay/localModel/messageDelta', itemId: 'local-item' } },
+  ]
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ items }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  try {
+    const messages = await listTaskEvents('task-local')
+    assert.equal(messages.length, 1)
+    assert.equal(messages[0]?.role, 'assistant')
+    assert.equal(messages[0]?.text, '我先检查项目。')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
 
 const markdown = `## Summary
 

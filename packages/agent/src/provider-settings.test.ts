@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  localClaudeEnvironment,
   LOCAL_MODEL_ENV_KEY,
   LOCAL_MODEL_PROVIDER_ID,
   isLocalModel,
+  localModelContextOverrides,
+  validContextTokens,
   localModelCatalog,
   localModelId,
   localModelProviderOverrides,
@@ -50,4 +53,34 @@ test('detects model provider transitions that require a new thread', () => {
   assert.equal(modelProviderChanged('gpt-6.1-sol', 'relay-local'), true)
   assert.equal(modelProviderChanged('gpt-6.1-sol', undefined), false)
   assert.equal(modelProviderChanged('relay-local:qwen2.5-coder:7b', 'relay-local'), false)
+})
+
+
+test('local context settings produce scoped Codex overrides and reject invalid sizes', () => {
+  assert.deepEqual(localModelContextOverrides({ localModel: { name: 'Local', baseUrl: 'http://localhost/v1', model: 'test', contextWindow: 32768, autoCompactTokenLimit: 24576 } }), ['model_context_window=32768', 'model_auto_compact_token_limit=24576'])
+  assert.deepEqual(localModelContextOverrides({}), [])
+  for (const value of [0, -1, 1.5, 10000001, '32768']) assert.equal(validContextTokens(value), false)
+  assert.equal(validContextTokens(32768), true)
+})
+
+
+test('routes custom models only to the configured runtime and preserves legacy Codex settings', () => {
+  const local = { name: 'Gateway', baseUrl: 'http://localhost:8080', model: 'custom-model' }
+  assert.equal(localModelCatalog({ localModel: local }).length, 1)
+  assert.deepEqual(localModelCatalog({ localModel: local }, 'Claude'), [])
+  const settings = { localModel: { ...local, agent: 'Claude' as const, apiKey: 'test-secret' } }
+  assert.deepEqual(localModelCatalog(settings), [])
+  assert.equal(localModelCatalog(settings, 'Claude')[0].model, 'relay-local:custom-model')
+  assert.deepEqual(localModelProviderOverrides(settings), [])
+  assert.equal(providerSettingsStatus(settings).localModel.agent, 'Claude')
+  assert.equal(providerSettingsStatus({}).localModel.agent, 'Claude')
+  assert.equal(providerSettingsStatus({ localModel: local }).localModel.agent, 'Codex')
+  const env = localClaudeEnvironment(settings)
+  assert.equal(env.ANTHROPIC_BASE_URL, local.baseUrl)
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'test-secret')
+  assert.equal(env.ANTHROPIC_API_KEY, '')
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, '')
+  assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, local.model)
+  assert.deepEqual(localClaudeEnvironment({ localModel: local }), {})
+  assert.equal(localClaudeEnvironment({ localModel: { ...local, agent: 'Claude' } }).ANTHROPIC_AUTH_TOKEN, 'relay-local')
 })
