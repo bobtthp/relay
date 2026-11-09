@@ -5,6 +5,7 @@ export type Task = {
   remoteSessionId?: string
   title: string
   agent: AgentName
+  accountId?: string
   time: string
   state: 'running' | 'completed' | 'failed' | 'interrupted' | 'waiting_for_approval'
   color: 'violet' | 'orange'
@@ -22,9 +23,9 @@ export type AgentService = {
   listTasks(): Promise<Task[]>
   listDeletedTasks(projectId: string): Promise<Array<{ id: string; title: string; lastActivityAt: string; deletedAt: string }>>
   restoreDeletedTask(projectId: string, sessionId: string): Promise<Task>
-  createTask(agent: AgentName, title: string, model?: string, reasoningEffort?: string): Promise<Task>
+  createTask(agent: AgentName, title: string, model?: string, reasoningEffort?: string, accountId?: string): Promise<Task>
   updateTaskModel(task: Task, model: string, reasoningEffort: string): Promise<Task>
-  switchAgent(task: Task, agent: AgentName, model?: string, reasoningEffort?: string): Promise<Task>
+  switchAgent(task: Task, agent: AgentName, model?: string, reasoningEffort?: string, accountId?: string): Promise<Task>
   sendMessage(task: Task, message: string, model?: string, reasoningEffort?: string): Promise<{ ok: true; message: string }>
   interruptTask(task: Task): Promise<void>
   compactTask(task: Task): Promise<void>

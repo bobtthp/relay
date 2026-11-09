@@ -5,15 +5,14 @@ import type { Task, TokenUsage } from '../../protocol/src/types.js'
 
 type SessionIndexEntry = { id: string; thread_name?: string; updated_at?: string }
 
-const codexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')
-const indexPath = path.join(codexHome, 'session_index.jsonl')
+const defaultCodexHome = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')
 const MAX_SESSION_METADATA_BYTES = 1024 * 1024
 const MAX_HISTORY_BYTES = 8 * 1024 * 1024
 const MAX_HISTORY_MESSAGES = 100
 const HISTORY_PAGE_MESSAGES = 10
 const MAX_HISTORY_MESSAGE_CHARS = 32_000
 const MAX_HISTORY_TOTAL_CHARS = 240_000
-let sessionCache: { loadedAt: number; data: ReturnType<typeof readSessionData> } | undefined
+const sessionCaches = new Map<string, { loadedAt: number; data: ReturnType<typeof readSessionData> }>()
 
 function readFileSlice(file: string, fromEnd: boolean, maxBytes: number): string {
   let descriptor: number | undefined
@@ -51,7 +50,7 @@ function rolloutFiles(directory: string): string[] {
   return files
 }
 
-function readSessionData() {
+function readSessionData(codexHome: string) {
   const result = new Map<string, { cwd: string; file: string }>()
   for (const file of rolloutFiles(path.join(codexHome, 'sessions'))) {
     try {
@@ -67,8 +66,9 @@ function readSessionData() {
   return result
 }
 
-export function refreshCodexSessionCache() {
-  sessionCache = undefined
+export function refreshCodexSessionCache(codexHome?: string) {
+  if (codexHome) sessionCaches.delete(codexHome)
+  else sessionCaches.clear()
 }
 
 function readCodexSessionTitle(file: string) {
@@ -92,11 +92,13 @@ function readCodexSessionTitle(file: string) {
   return undefined
 }
 
-export function discoverCodexTasks(projectId: string, projectPath: string): Task[] {
+export function discoverCodexTasks(projectId: string, projectPath: string, codexHome = defaultCodexHome, accountId?: string): Task[] {
   const now = Date.now()
-  if (!sessionCache || now - sessionCache.loadedAt > 60_000) sessionCache = { loadedAt: now, data: readSessionData() }
+  let sessionCache = sessionCaches.get(codexHome)
+  if (!sessionCache || now - sessionCache.loadedAt > 60_000) { sessionCache = { loadedAt: now, data: readSessionData(codexHome) }; sessionCaches.set(codexHome, sessionCache) }
   const sessionData = sessionCache.data
   const indexed = new Map<string, SessionIndexEntry>()
+  const indexPath = path.join(codexHome, 'session_index.jsonl')
   const indexContents = fs.existsSync(indexPath) ? fs.readFileSync(indexPath, 'utf8') : ''
   for (const line of indexContents.split('\n')) {
     try {
@@ -115,15 +117,16 @@ export function discoverCodexTasks(projectId: string, projectPath: string): Task
     const indexedTime = entry?.updated_at ? Date.parse(entry.updated_at) : 0
     const updatedAt = new Date(Math.max(fileUpdatedAt, Number.isFinite(indexedTime) ? indexedTime : 0)).toISOString()
     const title = entry?.thread_name?.trim() || readCodexSessionTitle(session.file) || 'Codex session'
-    matches.push({ id: `codex-${sessionId}`, remoteSessionId: sessionId, projectId, title, agent: 'Codex', status: 'completed', createdAt: updatedAt, lastActivityAt: updatedAt })
+    matches.push({ id: `codex-${sessionId}`, remoteSessionId: sessionId, projectId, title, agent: 'Codex', ...(accountId ? { accountId } : {}), status: 'completed', createdAt: updatedAt, lastActivityAt: updatedAt })
   }
   return matches.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
 }
 
-export function readCodexSessionHistory(sessionId: string): Array<{ role: 'user' | 'assistant'; text: string }> {
+export function readCodexSessionHistory(sessionId: string, codexHome = defaultCodexHome): Array<{ role: 'user' | 'assistant'; text: string }> {
   const messages: Array<{ role: 'user' | 'assistant'; text: string }> = []
   const now = Date.now()
-  if (!sessionCache || now - sessionCache.loadedAt > 60_000) sessionCache = { loadedAt: now, data: readSessionData() }
+  let sessionCache = sessionCaches.get(codexHome)
+  if (!sessionCache || now - sessionCache.loadedAt > 60_000) { sessionCache = { loadedAt: now, data: readSessionData(codexHome) }; sessionCaches.set(codexHome, sessionCache) }
   const session = sessionCache.data.get(sessionId)
   if (!session) return messages
   try {
@@ -171,8 +174,9 @@ export function readCodexSessionHistory(sessionId: string): Array<{ role: 'user'
   return messages
 }
 
-export function readCodexSessionHistoryPage(sessionId: string, before?: number): { items: Array<{ role: 'user' | 'assistant'; text: string }>; nextCursor: string | null; available: boolean } {
-  if (!sessionCache || Date.now() - sessionCache.loadedAt > 60_000) sessionCache = { loadedAt: Date.now(), data: readSessionData() }
+export function readCodexSessionHistoryPage(sessionId: string, before?: number, codexHome = defaultCodexHome): { items: Array<{ role: 'user' | 'assistant'; text: string }>; nextCursor: string | null; available: boolean } {
+  let sessionCache = sessionCaches.get(codexHome)
+  if (!sessionCache || Date.now() - sessionCache.loadedAt > 60_000) { sessionCache = { loadedAt: Date.now(), data: readSessionData(codexHome) }; sessionCaches.set(codexHome, sessionCache) }
   const session = sessionCache.data.get(sessionId)
   if (!session) return { items: [], nextCursor: null, available: false }
   let descriptor: number | undefined
@@ -220,9 +224,10 @@ export function readCodexSessionHistoryPage(sessionId: string, before?: number):
   }
 }
 
-export function readCodexSessionTokenUsage(sessionId: string): TokenUsage | undefined {
+export function readCodexSessionTokenUsage(sessionId: string, codexHome = defaultCodexHome): TokenUsage | undefined {
   const now = Date.now()
-  if (!sessionCache || now - sessionCache.loadedAt > 60_000) sessionCache = { loadedAt: now, data: readSessionData() }
+  let sessionCache = sessionCaches.get(codexHome)
+  if (!sessionCache || now - sessionCache.loadedAt > 60_000) { sessionCache = { loadedAt: now, data: readSessionData(codexHome) }; sessionCaches.set(codexHome, sessionCache) }
   const session = sessionCache.data.get(sessionId)
   if (!session) return undefined
   const tail = readFileSlice(session.file, true, 64 * 1024).split('\n').slice(1).reverse()

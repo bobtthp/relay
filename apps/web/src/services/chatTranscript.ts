@@ -45,14 +45,14 @@ export function mergeSessionTimeline(history: Array<{ role: 'user' | 'assistant'
 }
 
 export const isExecutionLog = (message: TranscriptMessage) => message.role === 'progress' || message.logType != null
-export const isFinalAssistantMessage = (method?: string) => method === 'item/agentMessage/delta'
+export const isFinalAssistantMessage = (method?: string) => method === 'item/agentMessage/delta' || method === 'relay/localModel/messageDelta'
 export const isStreamingDelta = (method?: string) => isFinalAssistantMessage(method) || method?.endsWith('/outputDelta') === true
 
 export function mergeEventSnapshots(snapshot: TranscriptMessage[], live: TranscriptMessage[]): TranscriptMessage[] {
   const merged = snapshot.map(message => ({ ...message }))
   for (const message of live) {
     const index = merged.findIndex(item => item.id === message.id || (
-      message.method === 'item/agentMessage/delta' && item.method === message.method && item.taskId === message.taskId && item.itemId === message.itemId
+      isFinalAssistantMessage(message.method) && item.method === message.method && item.taskId === message.taskId && item.itemId === message.itemId
     ))
     if (index < 0) {
       merged.push(message)

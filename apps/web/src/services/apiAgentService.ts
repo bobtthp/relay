@@ -8,6 +8,7 @@ type ApiTask = {
   remoteSessionId?: string
   title: string
   agent: AgentName
+  accountId?: string
   status: 'running' | 'completed' | 'failed' | 'interrupted' | 'waiting_for_approval'
   lastActivityAt: string
   model?: string
@@ -38,6 +39,7 @@ const toTask = (task: ApiTask): Task => ({
   remoteSessionId: task.remoteSessionId,
   title: task.title,
   agent: task.agent,
+  accountId: task.accountId,
   time: task.status === 'running' ? 'Running now' : 'Recently',
   state: task.status,
   color: task.agent === 'Codex' ? 'violet' : 'orange',
@@ -71,11 +73,11 @@ export const apiAgentService: AgentService = {
     }
     return toTask(await response.json() as ApiTask)
   },
-  async createTask(agent, title, model, reasoningEffort) {
+  async createTask(agent, title, model, reasoningEffort, accountId) {
     const response = await authenticatedFetch(`/api/projects/${encodeURIComponent(projectId())}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent, title, model, reasoningEffort }),
+      body: JSON.stringify({ agent, title, model, reasoningEffort, accountId }),
     })
     if (!response.ok) throw await requestError(response, 'Unable to create task')
     return toTask(await response.json() as ApiTask)
@@ -93,12 +95,12 @@ export const apiAgentService: AgentService = {
     }
     return toTask(await response.json() as ApiTask)
   },
-  async switchAgent(task, agent, model, reasoningEffort) {
+  async switchAgent(task, agent, model, reasoningEffort, accountId) {
     if (!task.id) throw new Error('Task id is missing')
     const response = await authenticatedFetch(`/api/tasks/${encodeURIComponent(task.id)}/agent`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent, model, reasoningEffort }),
+      body: JSON.stringify({ agent, model, reasoningEffort, accountId }),
     })
     if (!response.ok) throw await requestError(response, 'Unable to switch agent')
     return toTask(await response.json() as ApiTask)
@@ -156,15 +158,23 @@ export const apiAgentService: AgentService = {
 
 export type CodexModel = { model: string; agent?: AgentName; displayName: string; description?: string; isDefault?: boolean; hidden?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: Array<{ reasoningEffort: string; description: string }> }
 
-export async function listCodexModels(): Promise<CodexModel[]> {
-  const response = await authenticatedFetch('/api/models')
+export type AgentAccount = { id: string; name: string; agent: AgentName; configDirectory: string; isDefault?: boolean; createdAt: string; loginCommand: string }
+
+export async function listAgentAccounts(): Promise<AgentAccount[]> {
+  const response = await authenticatedFetch('/api/agent-accounts')
+  if (!response.ok) throw new Error('Unable to load agent accounts')
+  return ((await response.json()) as { items: AgentAccount[] }).items
+}
+
+export async function listCodexModels(accountId?: string): Promise<CodexModel[]> {
+  const response = await authenticatedFetch(`/api/models${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ''}`)
   if (!response.ok) throw new Error('Unable to load Codex models')
   const body = await response.json() as { items?: CodexModel[] }
   return body.items ?? []
 }
 
-export async function listClaudeModels(): Promise<CodexModel[]> {
-  const response = await authenticatedFetch('/api/models?agent=Claude')
+export async function listClaudeModels(accountId?: string): Promise<CodexModel[]> {
+  const response = await authenticatedFetch(`/api/models?agent=Claude${accountId ? `&accountId=${encodeURIComponent(accountId)}` : ''}`)
   if (!response.ok) throw new Error('Unable to load Claude models')
   const body = await response.json() as { items?: CodexModel[] }
   return body.items ?? []

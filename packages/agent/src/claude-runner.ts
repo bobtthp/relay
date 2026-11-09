@@ -264,11 +264,12 @@ export class ClaudeRunner {
     if (this.readinessCache && (Date.now() - this.readinessCache.at < 60_000 || this.runs.size > 0)) return this.readinessCache.readiness
     const runtime = await this.resolveRuntime()
     if (runtime.source !== 'local' || !runtime.executable) return { ...runtime, loggedIn: false }
+    if (this.environment().ANTHROPIC_BASE_URL && this.environment().ANTHROPIC_AUTH_TOKEN) return { ...runtime, loggedIn: true }
     const prompts = new PromptQueue()
     const probe = query({ prompt: prompts, options: { pathToClaudeCodeExecutable: runtime.executable, env: this.environment(), persistSession: false } })
     try {
       const info = await probe.accountInfo()
-      const loggedIn = Boolean(info.email || (info.tokenSource && info.tokenSource !== 'none') || (info.apiKeySource && info.apiKeySource !== 'none'))
+      const loggedIn = Boolean(this.environment().ANTHROPIC_BASE_URL || info.email || (info.tokenSource && info.tokenSource !== 'none') || (info.apiKeySource && info.apiKeySource !== 'none'))
       const readiness: ClaudeReadiness = { ...runtime, loggedIn, ...(info.subscriptionType ? { account: info.subscriptionType } : {}) }
       this.readinessCache = { at: Date.now(), readiness }
       return readiness
@@ -289,7 +290,7 @@ export class ClaudeRunner {
   isActive(taskId: string) { return this.runs.get(taskId)?.busy === true }
 
   async start(taskId: string, prompt: string, options: ClaudeTurnOptions, callbacks: ClaudeTurnCallbacks) {
-    const key = JSON.stringify([options.cwd, options.model, options.effort, options.memory, options.writableDirectories])
+    const key = JSON.stringify([options.cwd, options.model, options.effort, options.memory, options.writableDirectories, this.environment()])
     let previous = this.runs.get(taskId)
     // An interrupted turn takes a moment to end; let it, then reuse the process.
     if (previous?.busy && previous.interrupted) await Promise.race([previous.turnEnded, new Promise(resolve => setTimeout(resolve, 15_000))])

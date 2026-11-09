@@ -11,9 +11,12 @@ const codexBinary = process.env.CODEX_BIN ?? 'codex'
 export type CodexLaunchOptions = () => { env: NodeJS.ProcessEnv; configOverrides: string[] }
 
 /** Per-thread settings Relay applies on both thread/start and thread/resume, so resumed threads match new ones. */
-export type CodexThreadOptions = { modelProvider?: string; developerInstructions?: string; writableRoots?: string[] }
+export type CodexThreadOptions = { model?: string; modelProvider?: string; developerInstructions?: string; writableRoots?: string[] }
+
+const appServerModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'gpt-reserve' : model
 
 const threadParams = (options: CodexThreadOptions = {}) => ({
+  ...(options.model ? { model: appServerModel(options.model) } : {}),
   ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}),
   ...(options.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
   ...(options.writableRoots?.length ? { config: { sandbox_workspace_write: { writable_roots: options.writableRoots } } } : {}),
@@ -24,6 +27,7 @@ export class CodexAppServer {
 
   private process?: ChildProcessWithoutNullStreams
   private startup?: Promise<void>
+  private authRefresh?: Promise<void>
   private nextId = 1
   private pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout }>()
   private handlers = new Set<NotificationHandler>()
@@ -113,7 +117,7 @@ export class CodexAppServer {
     // Luna is the display model for the reserve quota, but the app-server
     // route must use the hidden reserve model id. Sending gpt-5.6-luna or
     // gpt-6-luna directly uses the regular model quota and can be rejected.
-    const explicitModel = model?.toLowerCase().includes('luna') ? 'gpt-reserve' : model
+    const explicitModel = appServerModel(model)
     await this.request('turn/start', { threadId, cwd, ...(explicitModel ? { model: explicitModel } : {}), ...(effort ? { effort } : {}), ...(sandboxPolicy ? { sandboxPolicy } : {}), input: [{ type: 'text', text }] })
   }
   async steerTurn(threadId: string, turnId: string, text: string) { await this.ensureStarted(); await this.request('turn/steer', { threadId, expectedTurnId: turnId, input: [{ type: 'text', text }] }) }
@@ -137,9 +141,9 @@ export class CodexAppServer {
    * A single question on a throwaway read-only thread that never asks for
    * approval; used for maintenance jobs such as consolidating shared memory.
    */
-  async runOneShot(cwd: string, prompt: string, options: { model?: string; developerInstructions: string }) {
+  async runOneShot(cwd: string, prompt: string, options: { model?: string; modelProvider?: string; developerInstructions: string }) {
     await this.ensureStarted()
-    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions })
+    const result = await this.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: options.developerInstructions, ...(options.model ? { model: appServerModel(options.model) } : {}), ...(options.modelProvider ? { modelProvider: options.modelProvider } : {}) })
     const threadId = (result.thread as { id?: string } | undefined)?.id
     if (!threadId) throw new Error('Codex app-server did not return a thread id')
     let text = ''
@@ -165,7 +169,23 @@ export class CodexAppServer {
     return { text, usage }
   }
 
-  async readRateLimits() { await this.ensureStarted(); return this.request('account/rateLimits/read', {}) }
+  async readRateLimits() {
+    await this.ensureStarted()
+    try { return await this.request('account/rateLimits/read', {}) }
+    catch (error) {
+      // A profile is often added before its terminal login is completed. The
+      // already-running app-server does not reload auth.json, so restart it
+      // once after an auth failure and let it pick up the new credentials.
+      if (!(error instanceof Error) || !/(?:^|\D)401(?:\D|$)|unauthorized/i.test(error.message)) throw error
+      if (!this.authRefresh) {
+        this.restart()
+        const refresh = this.ensureStarted().finally(() => { if (this.authRefresh === refresh) this.authRefresh = undefined })
+        this.authRefresh = refresh
+      }
+      await this.authRefresh
+      return this.request('account/rateLimits/read', {})
+    }
+  }
   stop() { this.process?.kill('SIGTERM') }
   /** Stops the current process; the next request starts one with fresh launch options. */
   restart() {

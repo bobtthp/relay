@@ -49,6 +49,8 @@ export type Task = {
   projectId: string
   title: string
   agent: AgentName
+  /** Local CLI account profile used by this task. */
+  accountId?: string
   status: TaskStatus
   createdAt: string
   lastActivityAt: string
@@ -65,7 +67,7 @@ export type Task = {
    * Sessions of the agents this task is not currently using, so switching back
    * resumes them. `lastSequence` is the last event that agent saw.
    */
-  agentSessions?: Partial<Record<AgentName, { sessionId?: string; lastSequence: number; memorySession?: string; checkpointSession?: boolean }>>
+  agentSessions?: Record<string, { sessionId?: string; lastSequence: number; memorySession?: string; checkpointSession?: boolean; accountId?: string }>
   /** Set by an agent switch; the next turn receives a handoff built from events after `sinceSequence`. */
   handoffPending?: { from: AgentName; sinceSequence: number }
   /** Estimated tokens spent on agent handoffs and checkpoint rules. */

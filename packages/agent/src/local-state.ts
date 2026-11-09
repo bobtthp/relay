@@ -1,25 +1,39 @@
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { Machine, Project, SessionEvent, Task } from '../../protocol/src/types.js'
 import { savedProjectPaths } from './local-project.js'
 
+const execFileAsync = promisify(execFile)
 
-const gitInfo = (projectPath: string) => {
-  const run = (args: string[]) => {
-    try {
-      return execFileSync('git', args, {
-        cwd: projectPath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 2_000,
-        killSignal: 'SIGKILL',
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
-      }).trim()
-    } catch { return '' }
+const gitInfo = () => ({ branch: 'detached', clean: false })
+
+const refreshProjectGitInfo = async (project: Project) => {
+  const run = async (args: string[]) => {
+    const { stdout } = await execFileAsync('git', ['-C', project.path, ...args], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      killSignal: 'SIGKILL',
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' },
+    })
+    return stdout.trim()
   }
-  return { branch: run(['branch', '--show-current']) || 'detached', clean: run(['status', '--porcelain']) === '' }
+  try {
+    const [branch, status] = await Promise.all([run(['branch', '--show-current']), run(['status', '--porcelain'])])
+    project.branch = branch || 'detached'
+    project.clean = status === ''
+  } catch { /* Keep the fast local fallback when Git or the filesystem is unavailable. */ }
+}
+
+const refreshProjectGitInfoInBackground = (items: Project[]) => {
+  const timer = setTimeout(() => {
+    void (async () => {
+      for (const item of items) await refreshProjectGitInfo(item)
+    })()
+  }, 0)
+  timer.unref()
 }
 
 export const machines: Machine[] = [{
@@ -31,12 +45,14 @@ export const machines: Machine[] = [{
 }]
 
 const projectIdForPath = (projectPath: string) => `project-${createHash('sha256').update(projectPath).digest('hex').slice(0, 16)}`
-const project = (projectPath: string): Project => ({ id: projectIdForPath(projectPath), machineId: 'machine-local', name: path.basename(projectPath), path: projectPath, ...gitInfo(projectPath) })
+const project = (projectPath: string): Project => ({ id: projectIdForPath(projectPath), machineId: 'machine-local', name: path.basename(projectPath), path: projectPath, ...gitInfo() })
 export const projects: Project[] = savedProjectPaths().map(project)
+refreshProjectGitInfoInBackground(projects)
 
 export function refreshProjects(selectedPath: string) {
   const paths = savedProjectPaths()
   projects.splice(0, projects.length, ...paths.map(project))
+  refreshProjectGitInfoInBackground(projects)
 }
 
 export const tasks: Task[] = []

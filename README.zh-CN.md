@@ -157,6 +157,19 @@ Codex 和 Claude 可以为每个项目共享一份长期记忆，用来保存以
 出现 `deepseek-flash` 和 `deepseek-v4-pro`。Key 只保存在本机，Relay 会自动配置
 provider，不需要修改 `~/.codex/config.toml`。
 
+## 自定义模型 Provider
+
+打开 **Agent 设置 → 自定义模型 Provider**，可以添加运行在本机、局域网或远程
+服务上的模型。填写任意 HTTP 或 HTTPS Base URL、模型 ID 和可选 API Key 后，
+该模型会出现在 Codex 的模型选择器中。远程服务建议使用 HTTPS，避免 Key 明文
+传输。Relay 仍使用 Codex 处理工具调用、审批和沙箱，推理请求则发往配置的端点。
+端点必须在 `/responses` 实现 Responses API；仅兼容 Chat Completions 的服务无法使用。
+
+在同一卡片中开启 **提交前委派回归给此 Provider** 后，Agent 发起 `git commit` 时会先
+经过门禁。Relay 优先运行仓库共用的 `ci-local` 入口，否则运行标准的 check、test、
+build 和 UI 安装测试，再由配置的模型审核有界结果。命令失败、模型结论无效、模型端点
+不可用或回归期间工作区快照变化，都会阻止提交请求。
+
 ## 网络代理
 
 Relay 服务在后台运行，不会继承终端里的代理环境变量。如果你的网络需要通过代理才能
@@ -167,7 +180,7 @@ Relay 服务在后台运行，不会继承终端里的代理环境变量。如�
 
 点击页面右上角的设置按钮，可以调整阅读字号和界面语言。你也可以开启任务
 完成提示音，在清脆、铃声和电子音之间选择，调节音量并试听。DeepSeek API Key、
-网络代理和交接检查点也在设置中。自动批准为可选功能，默认关闭；开启前请先阅读
+自定义模型 Provider 与回归委派、网络代理和交接检查点也在设置中。自动批准为可选功能，默认关闭；开启前请先阅读
 设置中的说明。
 
 ## 数据存放位置
@@ -176,7 +189,7 @@ Relay 服务在后台运行，不会继承终端里的代理环境变量。如�
 
 ```text
 auth-token               浏览器访问令牌
-provider-settings.json   DeepSeek API Key、网络代理、检查点设置（权限 600）
+provider-settings.json   Provider Key、自定义模型/回归、网络代理、检查点（权限 600）
 projects/<hash>/
   state.json             该项目的 Relay 任务与事件缓存
   memory/                共享项目记忆（MEMORY.md 由 Relay 重建）
