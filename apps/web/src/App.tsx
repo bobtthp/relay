@@ -27,7 +27,8 @@ const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limit
 type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
 const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
 const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
-const isLocalModel = (model?: string) => model?.startsWith('relay-local:') === true
+const LOCAL_MODEL_PREFIX = 'relay-local:'
+const isLocalModel = (model?: string) => model?.startsWith(LOCAL_MODEL_PREFIX) === true
 const quotaForModel = (model: string | undefined, rateLimitsByLimitId: Record<string, RateLimits>, fallback: RateLimits | null) => {
   // External and local providers do not use a ChatGPT quota pool.
   if (isDeepSeekModel(model) || isLocalModel(model)) return null
@@ -362,6 +363,7 @@ function App() {
   const [deepseekKeyDraft, setDeepseekKeyDraft] = useState('')
   const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus>({ configured: false, name: null, baseUrl: null, model: null, keyHint: null, contextWindow: null, autoCompactTokenLimit: null })
   const [localRegressionEnabled, setLocalRegressionEnabled] = useState(false)
+  const [pushUseLocalModel, setPushUseLocalModel] = useState(false)
   const [deepseekSaving, setDeepseekSaving] = useState(false)
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ url: null, systemProxy: null })
   const [proxyDraft, setProxyDraft] = useState('')
@@ -680,6 +682,7 @@ function App() {
       if (settings.deepseek) setDeepseekStatus(settings.deepseek)
       if (settings.localModel) setLocalModelStatus(settings.localModel)
       setLocalRegressionEnabled(settings.localRegressionEnabled === true)
+      setPushUseLocalModel(settings.pushUseLocalModel === true)
       if (settings.proxy) setProxyStatus(settings.proxy)
       setCheckpointsEnabled(settings.checkpointsEnabled === true)
     }).catch(() => undefined)
@@ -937,6 +940,7 @@ function App() {
           setDeepseekStatus(message.settings.deepseek)
           if (message.settings.localModel) setLocalModelStatus(message.settings.localModel)
           setLocalRegressionEnabled(message.settings.localRegressionEnabled === true)
+          setPushUseLocalModel(message.settings.pushUseLocalModel === true)
           if (message.settings.proxy) setProxyStatus(message.settings.proxy)
           setModelsReloadKey(current => current + 1)
         }
@@ -1025,20 +1029,18 @@ function App() {
     if (!draft.trim() || tasks[activeTask].state === 'waiting_for_approval') return
     const message = draft.trim()
     const task = tasks[activeTask]
+    const useLocal = pushUseLocalModel && localModelStatus.configured
+    const model = useLocal ? `${LOCAL_MODEL_PREFIX}${localModelStatus.model}` : (task.agent === 'Claude' ? claudeModel : effectiveModel)
+    const effort = useLocal ? '' : (task.agent === 'Claude' ? claudeEffort : effectiveEffort)
     if (task.agent === 'Claude') {
-      void apiAgentService.sendMessage(task, message, claudeModel || undefined, claudeEffort || undefined).then(() => {
+      void apiAgentService.sendMessage(task, message, model || undefined, effort || undefined).then(() => {
         setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
         setSent(true)
       }).catch(error => notifyAgentError(error, 'Unable to send message'))
       return
     }
-    if (quotaExhausted) return
-    if (effectiveModel && effectiveModel !== selectedModel) {
-      setSelectedModel(effectiveModel)
-      setSelectedEffort(effectiveEffort)
-      notify(language === 'zh' ? '原模型额度已用完，已切换到 Luna' : 'The current model quota is exhausted. Switched to Luna.')
-    }
-    void apiAgentService.sendMessage(task, message, effectiveModel || undefined, effectiveEffort || undefined).then(() => {
+    if (quotaExhausted && !useLocal) return
+    void apiAgentService.sendMessage(task, message, model || undefined, effort || undefined).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to send message'))
@@ -1261,20 +1263,22 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
   }
 
-  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null; localRegressionEnabled?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
+  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
     const previousLocalRegressionEnabled = localRegressionEnabled
     if (typeof change.localRegressionEnabled === 'boolean') setLocalRegressionEnabled(change.localRegressionEnabled)
+    if (typeof change.pushUseLocalModel === 'boolean') setPushUseLocalModel(change.pushUseLocalModel)
     setDeepseekSaving(true)
     void authenticatedFetch('/api/settings/providers', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(change),
     }).then(async response => {
-      const result = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean; restartPending?: boolean; error?: string }
+      const result = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean; restartPending?: boolean; error?: string }
       if (!response.ok || !result.deepseek) throw new Error(result.error ?? 'Unable to save settings')
       setDeepseekStatus(result.deepseek)
       if (result.localModel) setLocalModelStatus(result.localModel)
       setLocalRegressionEnabled(result.localRegressionEnabled === true)
+      setPushUseLocalModel(result.pushUseLocalModel === true)
       setCheckpointsEnabled(result.checkpointsEnabled === true)
       if (result.proxy) setProxyStatus(result.proxy)
       if ('deepseekApiKey' in change) setDeepseekKeyDraft('')
@@ -1453,7 +1457,7 @@ function App() {
             <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} accounts={agentAccounts} accountId={tasks[activeTask].accountId ?? (tasks[activeTask].agent === 'Claude' ? 'claude-default' : 'codex-default')} disabled={activeQuotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={activeQuotaExhausted} quotaModel={agentModel || (language === 'zh' ? '当前模型' : 'Current model')} language={language} models={agentModels} model={agentModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || agentModels.length === 0} agentSwitchDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} effortOptions={agentReasoningOptions} effort={agentEffort} effortDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onEffortChange={changeTaskEffort} sendHint={text.sendHint} />
             </div>
         </div></>}
-        {activeView === 'agents' && <AgentSettingsPage accounts={agentAccounts} language={language} onAccountsChanged={setAgentAccounts} onUseAccount={account => { setNewTaskAgent(account.agent); setNewTaskAccountId(account.id); localStorage.setItem(`relay-${account.agent.toLowerCase()}-account`, account.id); setModelsReloadKey(key => key + 1); notify(language === 'zh' ? `新任务将使用 ${account.name}` : `New tasks will use ${account.name}`) }} deepseekStatus={deepseekStatus} deepseekKeyDraft={deepseekKeyDraft} onDeepseekKeyDraftChange={setDeepseekKeyDraft} onSaveDeepseekKey={saveDeepseekKey} localModelStatus={localModelStatus} onSaveLocalModel={saveLocalModel} localRegressionEnabled={localRegressionEnabled} onLocalRegressionChange={enabled => saveProviderSettings({ localRegressionEnabled: enabled }, enabled ? (language === 'zh' ? '已开启本地提交前回归' : 'Local pre-commit regression enabled') : (language === 'zh' ? '已关闭本地提交前回归' : 'Local pre-commit regression disabled'))} providerSaving={deepseekSaving} checkpointsEnabled={checkpointsEnabled} onCheckpointsChange={enabled => saveProviderSettings({ checkpointsEnabled: enabled }, enabled ? (language === 'zh' ? '已开启交接检查点' : 'Handoff checkpoints on') : (language === 'zh' ? '已关闭交接检查点' : 'Handoff checkpoints off'))} />}
+        {activeView === 'agents' && <AgentSettingsPage accounts={agentAccounts} language={language} onAccountsChanged={setAgentAccounts} onUseAccount={account => { setNewTaskAgent(account.agent); setNewTaskAccountId(account.id); localStorage.setItem(`relay-${account.agent.toLowerCase()}-account`, account.id); setModelsReloadKey(key => key + 1); notify(language === 'zh' ? `新任务将使用 ${account.name}` : `New tasks will use ${account.name}`) }} deepseekStatus={deepseekStatus} deepseekKeyDraft={deepseekKeyDraft} onDeepseekKeyDraftChange={setDeepseekKeyDraft} onSaveDeepseekKey={saveDeepseekKey} localModelStatus={localModelStatus} onSaveLocalModel={saveLocalModel} localRegressionEnabled={localRegressionEnabled} onLocalRegressionChange={enabled => saveProviderSettings({ localRegressionEnabled: enabled }, enabled ? (language === 'zh' ? '已开启本地提交前回归' : 'Local pre-commit regression enabled') : (language === 'zh' ? '已关闭本地提交前回归' : 'Local pre-commit regression disabled'))} pushUseLocalModel={pushUseLocalModel} onPushUseLocalModelChange={enabled => saveProviderSettings({ pushUseLocalModel: enabled }, enabled ? (language === 'zh' ? '已开启 push 使用本地模型' : 'Push with local model on') : (language === 'zh' ? '已关闭 push 使用本地模型' : 'Push with local model off'))} providerSaving={deepseekSaving} checkpointsEnabled={checkpointsEnabled} onCheckpointsChange={enabled => saveProviderSettings({ checkpointsEnabled: enabled }, enabled ? (language === 'zh' ? '已开启交接检查点' : 'Handoff checkpoints on') : (language === 'zh' ? '已关闭交接检查点' : 'Handoff checkpoints off'))} />}
       </main>
     </div>
     {recoverTasksModal}

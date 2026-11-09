@@ -16,6 +16,8 @@ export type ProviderSettings = {
   }
   /** Gate git commit approvals on deterministic checks reviewed by the configured custom model. */
   localRegressionEnabled?: boolean
+  /** When true, push/send uses the local model instead of the default model. */
+  pushUseLocalModel?: boolean
   /** HTTP(S) proxy for agent traffic. Background services do not inherit a shell's proxy variables. */
   httpProxy?: string
   /** Ask agents to keep a per-task checkpoint so a switched-in agent knows the progress. Costs tokens. */
@@ -129,6 +131,7 @@ export function readProviderSettings(): ProviderSettings {
       ...(stored.localRegressionEnabled === true ? { localRegressionEnabled: true } : {}),
       ...(typeof stored.httpProxy === 'string' && normalizeProxyUrl(stored.httpProxy) ? { httpProxy: normalizeProxyUrl(stored.httpProxy) } : {}),
       ...(stored.checkpointsEnabled === true ? { checkpointsEnabled: true } : {}),
+      ...(typeof stored.pushUseLocalModel === 'boolean' ? { pushUseLocalModel: true } : {}),
     }
   } catch {
     return {}

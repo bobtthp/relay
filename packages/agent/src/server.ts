@@ -1260,7 +1260,7 @@ app.put('/api/settings/approvals', (request, response) => {
 app.get('/api/settings/providers', (_request, response) => response.json(providerSettingsStatus(providerSettings)))
 app.put('/api/settings/providers', (request, response) => {
   const body = asRecord(request.body) ?? {}
-  if (!('deepseekApiKey' in body) && !('localModel' in body) && !('localRegressionEnabled' in body) && !('httpProxy' in body) && !('checkpointsEnabled' in body)) return response.status(400).json({ error: 'Provide deepseekApiKey, localModel, localRegressionEnabled, httpProxy or checkpointsEnabled' })
+  if (!('deepseekApiKey' in body) && !('localModel' in body) && !('localRegressionEnabled' in body) && !('pushUseLocalModel' in body) && !('httpProxy' in body) && !('checkpointsEnabled' in body)) return response.status(400).json({ error: 'Provide deepseekApiKey, localModel, localRegressionEnabled, pushUseLocalModel, httpProxy or checkpointsEnabled' })
   if ('checkpointsEnabled' in body && typeof body.checkpointsEnabled !== 'boolean') return response.status(400).json({ error: 'checkpointsEnabled must be a boolean' })
   if ('localRegressionEnabled' in body && typeof body.localRegressionEnabled !== 'boolean') return response.status(400).json({ error: 'localRegressionEnabled must be a boolean' })
   const next = { ...providerSettings }
@@ -1312,6 +1312,11 @@ app.put('/api/settings/providers', (request, response) => {
     if (body.localRegressionEnabled && !next.localModel) return response.status(400).json({ error: 'Configure a custom model provider before enabling delegated regression' })
     if (body.localRegressionEnabled) next.localRegressionEnabled = true
     else delete next.localRegressionEnabled
+  }
+  if (typeof body.pushUseLocalModel === 'boolean') {
+    if (body.pushUseLocalModel && !next.localModel) return response.status(400).json({ error: 'Configure a custom model provider before enabling push with local model' })
+    if (body.pushUseLocalModel) next.pushUseLocalModel = true
+    else delete next.pushUseLocalModel
   }
   providerSettings = next
   writeProviderSettings(providerSettings)
