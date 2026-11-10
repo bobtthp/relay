@@ -9,7 +9,7 @@ import {
 import { MemoryPanel } from './MemoryPanel'
 import { ProjectImagesPanel } from './ProjectImagesPanel'
 import { AgentSettingsPage } from './AgentSettingsPage'
-import { AgentRequestError, apiAgentService, getTaskTokenUsage, listAgentAccounts, listClaudeModels, listCodexModels, listTaskEvents, listTaskHistory, type AgentAccount, type CodexModel } from './services/apiAgentService'
+import { AgentRequestError, apiAgentService, getTaskTokenUsage, listAgentAccounts, listClaudeModels, listCodexModels, listSkills, listTaskEvents, listTaskHistory, type AgentAccount, type CodexModel, type Skill } from './services/apiAgentService'
 import { isExecutionLog, isFinalAssistantMessage, isStreamingDelta, mergeEventSnapshots, mergeSessionTimeline, type TranscriptMessage } from './services/chatTranscript'
 import { type AgentName, type Task } from './services/agentService'
 import { authenticatedFetch, getRelayAccessToken } from './services/auth'
@@ -27,7 +27,8 @@ const quotaIsExhausted = (limits: RateLimits | null) => Boolean(limits && [limit
 type RateLimitResponse = { rateLimits?: RateLimits; rateLimitsByLimitId?: Record<string, RateLimits> }
 const quotaLimitIdForModel = (model?: string) => model?.toLowerCase().includes('luna') ? 'base_model_inference' : 'codex'
 const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
-const isLocalModel = (model?: string) => model?.startsWith('relay-local:') === true
+const LOCAL_MODEL_PREFIX = 'relay-local:'
+const isLocalModel = (model?: string) => model?.startsWith(LOCAL_MODEL_PREFIX) === true
 const quotaForModel = (model: string | undefined, rateLimitsByLimitId: Record<string, RateLimits>, fallback: RateLimits | null) => {
   // External and local providers do not use a ChatGPT quota pool.
   if (isDeepSeekModel(model) || isLocalModel(model)) return null
@@ -243,6 +244,7 @@ type ComposerActions = {
   changeTaskModel: (model: string) => void
   switchAgent: (agent: AgentName) => void
   switchAccount: (accountId: string) => void
+  onPush: () => void
 }
 
 type TaskControlProps = {
@@ -273,11 +275,15 @@ const TaskComposer = memo(function TaskComposer({
   quotaModel,
   language,
   sendHint,
+  pushEnabled,
+  onPush,
 }: TaskControlProps & {
   disabled: boolean
   quotaBlocked: boolean
   quotaModel: string
   sendHint: string
+  pushEnabled: boolean
+  onPush: () => void
 }) {
   const [draft, setDraft] = useState('')
   const submit = () => {
@@ -286,7 +292,8 @@ const TaskComposer = memo(function TaskComposer({
     setDraft('')
   }
 
-  return <div className="composer"><textarea disabled={disabled} placeholder={quotaBlocked ? (language === 'zh' ? `${quotaModel} 额度已用完，请切换到 Luna 或等待额度重置` : `${quotaModel} quota exhausted. Switch to Luna or wait for the quota reset.`) : disabled ? (language === 'zh' ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button><span className="composer-hint">{quotaBlocked ? (language === 'zh' ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
+  const zh = language === 'zh'
+  return <div className="composer"><textarea disabled={disabled} placeholder={quotaBlocked ? (zh ? `${quotaModel} 额度已用完，请切换到 Luna 或等待额度重置` : `${quotaModel} quota exhausted. Switch to Luna or wait for the quota reset.`) : disabled ? (zh ? '请先处理上方审批请求' : 'Respond to the approval request above first') : `Ask ${agent} anything...`} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); submit() } }} /><button className="send-btn" onClick={submit} disabled={disabled} aria-label="Send message">↑</button>{pushEnabled && <button className="push-btn" onClick={onPush} disabled={disabled} aria-label="Push with local model">{zh ? 'Push' : 'Push'}</button>}<span className="composer-hint">{quotaBlocked ? (zh ? '额度重置后才能发送' : 'Sending resumes when quota resets') : sendHint}</span></div>
 })
 
 let completionAudioContext: AudioContext | undefined
@@ -362,10 +369,13 @@ function App() {
   const [deepseekKeyDraft, setDeepseekKeyDraft] = useState('')
   const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus>({ configured: false, name: null, baseUrl: null, model: null, keyHint: null, contextWindow: null, autoCompactTokenLimit: null })
   const [localRegressionEnabled, setLocalRegressionEnabled] = useState(false)
+  const [pushUseLocalModel, setPushUseLocalModel] = useState(false)
   const [deepseekSaving, setDeepseekSaving] = useState(false)
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ url: null, systemProxy: null })
   const [proxyDraft, setProxyDraft] = useState('')
   const [checkpointsEnabled, setCheckpointsEnabled] = useState(false)
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([])
   const [modelsReloadKey, setModelsReloadKey] = useState(0)
   const completionSoundSettings = useRef({ enabled: completionSoundEnabled, quotaResetEnabled: quotaResetSoundEnabled, volume: completionSoundVolume, sound: completionSound })
   completionSoundSettings.current = { enabled: completionSoundEnabled, quotaResetEnabled: quotaResetSoundEnabled, volume: completionSoundVolume, sound: completionSound }
@@ -384,7 +394,7 @@ function App() {
   // reset-triggered refresh is not swallowed by an in-flight pre-reset poll.
   const codexRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
   const claudeRateLimitLoading = useRef<false | 'running' | 'pending'>(false)
-  const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {}, switchAgent: () => {}, switchAccount: () => {} })
+  const composerActionsRef = useRef<ComposerActions>({ sendMessage: () => {}, changeTaskModel: () => {}, switchAgent: () => {}, switchAccount: () => {}, onPush: () => {} })
   const [sent, setSent] = useState(false)
   const [newTaskOpen, setNewTaskOpen] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
@@ -676,13 +686,17 @@ function App() {
     }).catch(() => undefined)
     void authenticatedFetch('/api/settings/providers').then(async response => {
       if (!response.ok) return
-      const settings = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
+      const settings = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
       if (settings.deepseek) setDeepseekStatus(settings.deepseek)
       if (settings.localModel) setLocalModelStatus(settings.localModel)
       setLocalRegressionEnabled(settings.localRegressionEnabled === true)
+      setPushUseLocalModel(settings.pushUseLocalModel === true)
       if (settings.proxy) setProxyStatus(settings.proxy)
       setCheckpointsEnabled(settings.checkpointsEnabled === true)
     }).catch(() => undefined)
+  }, [])
+  useEffect(() => {
+    listSkills().then(setSkills).catch(() => undefined)
   }, [])
   useEffect(() => {
     const available = agentAccounts.filter(account => account.agent === newTaskAgent)
@@ -897,7 +911,7 @@ function App() {
         tokenUsage?: Task['tokenUsage']
         approval?: NonNullable<Task['pendingApprovals']>[number]
         approvalId?: string
-        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus }
+        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
         rateLimits?: RateLimits | null
         projectId?: string
         agent?: AgentName
@@ -937,6 +951,7 @@ function App() {
           setDeepseekStatus(message.settings.deepseek)
           if (message.settings.localModel) setLocalModelStatus(message.settings.localModel)
           setLocalRegressionEnabled(message.settings.localRegressionEnabled === true)
+          setPushUseLocalModel(message.settings.pushUseLocalModel === true)
           if (message.settings.proxy) setProxyStatus(message.settings.proxy)
           setModelsReloadKey(current => current + 1)
         }
@@ -1025,23 +1040,46 @@ function App() {
     if (!draft.trim() || tasks[activeTask].state === 'waiting_for_approval') return
     const message = draft.trim()
     const task = tasks[activeTask]
+    const useLocal = pushUseLocalModel && localModelStatus.configured
+    const model = useLocal ? `${LOCAL_MODEL_PREFIX}${localModelStatus.model}` : (task.agent === 'Claude' ? claudeModel : effectiveModel)
+    const effort = useLocal ? '' : (task.agent === 'Claude' ? claudeEffort : effectiveEffort)
     if (task.agent === 'Claude') {
-      void apiAgentService.sendMessage(task, message, claudeModel || undefined, claudeEffort || undefined).then(() => {
+      void apiAgentService.sendMessage(task, message, model || undefined, effort || undefined).then(() => {
         setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
         setSent(true)
       }).catch(error => notifyAgentError(error, 'Unable to send message'))
       return
     }
-    if (quotaExhausted) return
-    if (effectiveModel && effectiveModel !== selectedModel) {
-      setSelectedModel(effectiveModel)
-      setSelectedEffort(effectiveEffort)
-      notify(language === 'zh' ? '原模型额度已用完，已切换到 Luna' : 'The current model quota is exhausted. Switched to Luna.')
-    }
-    void apiAgentService.sendMessage(task, message, effectiveModel || undefined, effectiveEffort || undefined).then(() => {
+    if (quotaExhausted && !useLocal) return
+    void apiAgentService.sendMessage(task, message, model || undefined, effort || undefined).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to send message'))
+  }
+
+  const handlePush = async () => {
+    const task = tasks[activeTask]
+    if (!task) return
+    if (!localModelStatus.configured) {
+      notify(language === 'zh' ? '请先配置本地模型' : 'Please configure a local model first')
+      return
+    }
+    const selectedSkills = skills.filter(s => selectedSkillNames.includes(s.name))
+    const skillsText = selectedSkills.length > 0
+      ? (language === 'zh'
+        ? ` 使用以下 skill：${selectedSkills.map(s => s.name).join('、')}。`
+        : ` Use the following skills: ${selectedSkills.map(s => s.name).join(', ')}.`)
+      : ''
+    const pushPrompt = language === 'zh'
+      ? `请触发本地模型的 skill：1) 执行门禁检查（运行 CI、编写单测/e2e）2) 评估结果 3) 如果通过则提交代码并推送到仓库。请在执行过程中实时输出每一步的结果。${skillsText}`
+      : `Please trigger the local model skill: 1) Perform gate checks (run CI, write unit tests/e2e) 2) Evaluate results 3) If passing, commit code and push to repository. Output each step result in real time.${skillsText}`
+    void apiAgentService.sendMessage(task, pushPrompt).then(() => {
+      setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
+      setSent(true)
+    }).catch(error => {
+      if (task.agent === 'Claude') notifyAgentError(error, 'Unable to send message')
+      else notify(error instanceof Error ? error.message : 'Unable to send message')
+    })
   }
 
   const compactTask = (task: Task) => {
@@ -1171,7 +1209,7 @@ function App() {
     }).catch(error => notifyAgentError(error, 'Unable to switch account'))
   }
 
-  composerActionsRef.current = { sendMessage, changeTaskModel, switchAgent, switchAccount }
+  composerActionsRef.current = { sendMessage, changeTaskModel, switchAgent, switchAccount, onPush: handlePush }
 
   const changeTaskEffort = (effort: string) => {
     const task = tasks[activeTask]
@@ -1261,20 +1299,22 @@ function App() {
     }).catch(error => notify(error instanceof Error ? error.message : 'Unable to save approval settings'))
   }
 
-  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null; localRegressionEnabled?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
+  const saveProviderSettings = (change: { deepseekApiKey?: string | null; localModel?: { name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; httpProxy?: string | null; checkpointsEnabled?: boolean }, savedMessage: string) => {
     const previousLocalRegressionEnabled = localRegressionEnabled
     if (typeof change.localRegressionEnabled === 'boolean') setLocalRegressionEnabled(change.localRegressionEnabled)
+    if (typeof change.pushUseLocalModel === 'boolean') setPushUseLocalModel(change.pushUseLocalModel)
     setDeepseekSaving(true)
     void authenticatedFetch('/api/settings/providers', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(change),
     }).then(async response => {
-      const result = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean; restartPending?: boolean; error?: string }
+      const result = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean; restartPending?: boolean; error?: string }
       if (!response.ok || !result.deepseek) throw new Error(result.error ?? 'Unable to save settings')
       setDeepseekStatus(result.deepseek)
       if (result.localModel) setLocalModelStatus(result.localModel)
       setLocalRegressionEnabled(result.localRegressionEnabled === true)
+      setPushUseLocalModel(result.pushUseLocalModel === true)
       setCheckpointsEnabled(result.checkpointsEnabled === true)
       if (result.proxy) setProxyStatus(result.proxy)
       if ('deepseekApiKey' in change) setDeepseekKeyDraft('')
@@ -1450,10 +1490,10 @@ function App() {
             <ChatTranscript key={tasks[activeTask].id} messages={chatMessages} agent={tasks[activeTask].agent} language={language} hasOlder={historyCursor != null} loadingOlder={historyLoading} onLoadOlder={loadOlderTaskHistory} />
             {tasks[activeTask].state === 'failed' && <div className="agent-switch-banner"><span>{language === 'zh' ? `${tasks[activeTask].agent} 没能完成这一轮（例如额度用完）。可以换另一个 Agent 接着做，进度会自动交接。` : `${tasks[activeTask].agent} could not finish this turn (for example, a usage limit). Another agent can continue with a handoff.`}</span><button className="primary-btn" onClick={() => switchAgent(tasks[activeTask].agent === 'Codex' ? 'Claude' : 'Codex')}>{language === 'zh' ? `切换到 ${tasks[activeTask].agent === 'Codex' ? 'Claude' : 'Codex'} 继续` : `Continue with ${tasks[activeTask].agent === 'Codex' ? 'Claude' : 'Codex'}`}</button></div>}
             {sent && <div className="sent-note"><span className="pulse" /> Message sent to {tasks[activeTask].agent}</div>}
-            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} accounts={agentAccounts} accountId={tasks[activeTask].accountId ?? (tasks[activeTask].agent === 'Claude' ? 'claude-default' : 'codex-default')} disabled={activeQuotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={activeQuotaExhausted} quotaModel={agentModel || (language === 'zh' ? '当前模型' : 'Current model')} language={language} models={agentModels} model={agentModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || agentModels.length === 0} agentSwitchDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} effortOptions={agentReasoningOptions} effort={agentEffort} effortDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onEffortChange={changeTaskEffort} sendHint={text.sendHint} />
+            <TaskComposer actions={composerActionsRef} agent={tasks[activeTask].agent} accounts={agentAccounts} accountId={tasks[activeTask].accountId ?? (tasks[activeTask].agent === 'Claude' ? 'claude-default' : 'codex-default')} disabled={activeQuotaExhausted || tasks[activeTask].state === 'waiting_for_approval'} quotaBlocked={activeQuotaExhausted} quotaModel={agentModel || (language === 'zh' ? '当前模型' : 'Current model')} language={language} models={agentModels} model={agentModel} modelDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval' || agentModels.length === 0} agentSwitchDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} effortOptions={agentReasoningOptions} effort={agentEffort} effortDisabled={tasks[activeTask].state === 'running' || tasks[activeTask].state === 'waiting_for_approval'} onEffortChange={changeTaskEffort} sendHint={text.sendHint} pushEnabled={pushUseLocalModel} onPush={handlePush} />
             </div>
         </div></>}
-        {activeView === 'agents' && <AgentSettingsPage accounts={agentAccounts} language={language} onAccountsChanged={setAgentAccounts} onUseAccount={account => { setNewTaskAgent(account.agent); setNewTaskAccountId(account.id); localStorage.setItem(`relay-${account.agent.toLowerCase()}-account`, account.id); setModelsReloadKey(key => key + 1); notify(language === 'zh' ? `新任务将使用 ${account.name}` : `New tasks will use ${account.name}`) }} deepseekStatus={deepseekStatus} deepseekKeyDraft={deepseekKeyDraft} onDeepseekKeyDraftChange={setDeepseekKeyDraft} onSaveDeepseekKey={saveDeepseekKey} localModelStatus={localModelStatus} onSaveLocalModel={saveLocalModel} localRegressionEnabled={localRegressionEnabled} onLocalRegressionChange={enabled => saveProviderSettings({ localRegressionEnabled: enabled }, enabled ? (language === 'zh' ? '已开启本地提交前回归' : 'Local pre-commit regression enabled') : (language === 'zh' ? '已关闭本地提交前回归' : 'Local pre-commit regression disabled'))} providerSaving={deepseekSaving} checkpointsEnabled={checkpointsEnabled} onCheckpointsChange={enabled => saveProviderSettings({ checkpointsEnabled: enabled }, enabled ? (language === 'zh' ? '已开启交接检查点' : 'Handoff checkpoints on') : (language === 'zh' ? '已关闭交接检查点' : 'Handoff checkpoints off'))} />}
+        {activeView === 'agents' && <AgentSettingsPage accounts={agentAccounts} language={language} onAccountsChanged={setAgentAccounts} onUseAccount={account => { setNewTaskAgent(account.agent); setNewTaskAccountId(account.id); localStorage.setItem(`relay-${account.agent.toLowerCase()}-account`, account.id); setModelsReloadKey(key => key + 1); notify(language === 'zh' ? `新任务将使用 ${account.name}` : `New tasks will use ${account.name}`) }} deepseekStatus={deepseekStatus} deepseekKeyDraft={deepseekKeyDraft} onDeepseekKeyDraftChange={setDeepseekKeyDraft} onSaveDeepseekKey={saveDeepseekKey} localModelStatus={localModelStatus} onSaveLocalModel={saveLocalModel} localRegressionEnabled={localRegressionEnabled} onLocalRegressionChange={enabled => saveProviderSettings({ localRegressionEnabled: enabled }, enabled ? (language === 'zh' ? '已开启本地提交前回归' : 'Local pre-commit regression enabled') : (language === 'zh' ? '已关闭本地提交前回归' : 'Local pre-commit regression disabled'))} pushUseLocalModel={pushUseLocalModel} onPushUseLocalModelChange={enabled => saveProviderSettings({ pushUseLocalModel: enabled }, enabled ? (language === 'zh' ? '已开启 push 使用本地模型' : 'Push with local model on') : (language === 'zh' ? '已关闭 push 使用本地模型' : 'Push with local model off'))} providerSaving={deepseekSaving} checkpointsEnabled={checkpointsEnabled} onCheckpointsChange={enabled => saveProviderSettings({ checkpointsEnabled: enabled }, enabled ? (language === 'zh' ? '已开启交接检查点' : 'Handoff checkpoints on') : (language === 'zh' ? '已关闭交接检查点' : 'Handoff checkpoints off'))} />}
       </main>
     </div>
     {recoverTasksModal}

@@ -16,6 +16,8 @@ export type ProviderSettings = {
   }
   /** Gate git commit approvals on deterministic checks reviewed by the configured custom model. */
   localRegressionEnabled?: boolean
+  /** When true, push/send uses the local model instead of the default model. */
+  pushUseLocalModel?: boolean
   /** HTTP(S) proxy for agent traffic. Background services do not inherit a shell's proxy variables. */
   httpProxy?: string
   /** Ask agents to keep a per-task checkpoint so a switched-in agent knows the progress. Costs tokens. */
@@ -26,6 +28,7 @@ export type ProviderSettingsStatus = {
   deepseek: { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
   localModel: { agent: 'Codex' | 'Claude'; configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null; contextWindow: number | null; autoCompactTokenLimit: number | null }
   localRegressionEnabled: boolean
+  pushUseLocalModel: boolean
   proxy: { url: string | null; systemProxy: string | null }
   checkpointsEnabled: boolean
 }
@@ -129,6 +132,7 @@ export function readProviderSettings(): ProviderSettings {
       ...(stored.localRegressionEnabled === true ? { localRegressionEnabled: true } : {}),
       ...(typeof stored.httpProxy === 'string' && normalizeProxyUrl(stored.httpProxy) ? { httpProxy: normalizeProxyUrl(stored.httpProxy) } : {}),
       ...(stored.checkpointsEnabled === true ? { checkpointsEnabled: true } : {}),
+      ...(typeof stored.pushUseLocalModel === 'boolean' ? { pushUseLocalModel: true } : {}),
     }
   } catch {
     return {}
@@ -201,6 +205,7 @@ export function providerSettingsStatus(settings: ProviderSettings): ProviderSett
       keyHint: settings.localModel.apiKey ? `…${settings.localModel.apiKey.slice(-4)}` : null,
     } : { agent: 'Claude', configured: false, name: null, baseUrl: null, model: null, keyHint: null, contextWindow: null, autoCompactTokenLimit: null },
     localRegressionEnabled: settings.localRegressionEnabled === true && Boolean(settings.localModel),
+    pushUseLocalModel: settings.pushUseLocalModel === true,
     proxy: { url: settings.httpProxy ? maskProxy(settings.httpProxy) : null, systemProxy: detectSystemProxy() },
     checkpointsEnabled: settings.checkpointsEnabled === true,
   }

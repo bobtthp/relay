@@ -39,20 +39,20 @@ class Relay < Formula
       token_path.write(SecureRandom.hex(32))
       token_path.chmod(0600)
     end
-    puts "Relay uses port 3000 and is protected by a local access token."
+    puts "Relay uses port 3003 and is protected by a local access token."
     puts "Start the background service with: brew services start bobtthp/relay/relay"
-    puts "On this Mac: http://127.0.0.1:3000"
+    puts "On this Mac: http://127.0.0.1:3003"
     lan_addresses = Socket.ip_address_list.filter_map do |address|
       address.ip_address if address.ipv4? && !address.ipv4_loopback?
     end.uniq
-    lan_addresses.each { |address| puts "On this local network: http://#{address}:3000" }
+    lan_addresses.each { |address| puts "On this local network: http://#{address}:3003" }
     token = token_path.read.strip
     puts
     puts ">>> RELAY ACCESS TOKEN — KEEP PRIVATE <<<"
     puts($stdout.tty? ? "\e[1;97;41m  #{token}  \e[0m" : "  #{token}  ")
     puts
     puts "To retrieve it later: cat #{File.join(Dir.home, ".relay-web", "auth-token")}"
-    opoo "Use only on a trusted local network. Do not expose port 3000 to the public internet or forward it on your router."
+    opoo "Use only on a trusted local network. Do not expose port 3003 to the public internet or forward it on your router."
   end
 
   service do
@@ -60,7 +60,7 @@ class Relay < Formula
     keep_alive true
     working_dir opt_libexec
     environment_variables PATH: std_service_path_env,
-                          PORT: "3000",
+                          PORT: "3003",
                           RELAY_HOST: "0.0.0.0"
     log_path var/"log/relay.log"
     error_log_path var/"log/relay-error.log"
