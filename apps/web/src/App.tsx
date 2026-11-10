@@ -1059,23 +1059,16 @@ function App() {
       notify(language === 'zh' ? '请先配置本地模型' : 'Please configure a local model first')
       return
     }
-    // Build a simple push prompt that delegates to the local model's skill
     const pushPrompt = language === 'zh'
-      ? '请评估当前任务，使用本地模型执行提交和推送。'
-      : 'Please evaluate the current task and use the local model to commit and push.'
-
-    const model = `${LOCAL_MODEL_PREFIX}${localModelStatus.model}`
-    if (task.agent === 'Claude') {
-      void apiAgentService.sendMessage(task, pushPrompt, model).then(() => {
-        setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
-        setSent(true)
-      }).catch(error => notifyAgentError(error, 'Unable to send message'))
-      return
-    }
-    void apiAgentService.sendMessage(task, pushPrompt, model).then(() => {
+      ? '请评估当前任务，使用 skill 执行门禁检查、提交和推送。'
+      : 'Please evaluate the current task and use your skill to perform gate checks, commit and push.'
+    void apiAgentService.sendMessage(task, pushPrompt).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
-    }).catch(error => notify(error instanceof Error ? error.message : 'Unable to send message'))
+    }).catch(error => {
+      if (task.agent === 'Claude') notifyAgentError(error, 'Unable to send message')
+      else notify(error instanceof Error ? error.message : 'Unable to send message')
+    })
   }
 
   const compactTask = (task: Task) => {

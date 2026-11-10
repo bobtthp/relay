@@ -19,7 +19,7 @@ import { listDirectories, removeSavedProject, saveSelectedProject, validateProje
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
 import { buildHandoff, checkpointDirectory, checkpointRule } from './handoff.js'
 import { MemoryConflictError, MemoryWatcher, applyConsolidation, consolidationInstructions, consolidationPrompt, discardConsolidation, memoryStats, parseConsolidationPlan, readConsolidation, storeConsolidationProposal, claudeMemoryPromptAppend, codexMemoryInstructions, deleteMemoryEntry, estimateTokens, memoryPrimer, importClaudeMemories, listMemoryEntries, memoryDirectory, previewClaudeImport, readMemoryAudit, readMemoryIndex, readMemorySettings, rollbackClaudeImport, setMemoryEnabled, touchesMemory, writeMemoryEntry } from './project-memory.js'
-import { localClaudeEnvironment, localModelContextOverrides, validContextTokens, DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PREFIX, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
+import { localClaudeEnvironment, localModelContextOverrides, validContextTokens, DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 import { deleteProjectImage, listProjectImages, projectImagePath, saveProjectImage } from './project-images.js'
 import { createProjectImageShare, deleteProjectImageShare, projectIdForImageShare, projectImageShare } from './project-image-shares.js'
 import { agentAccount, agentAccountEnvironment, agentAccountLoginCommand, createAgentAccount, deleteAgentAccount, listAgentAccounts } from './agent-accounts.js'
@@ -1941,7 +1941,7 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
   const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : undefined
   if (!task) return response.status(404).json({ error: 'Task not found' })
   if (!message) return response.status(400).json({ error: 'Message is required' })
-  if (model?.startsWith(LOCAL_MODEL_PREFIX) !== true && task.agent === 'Claude' && !claudeForTask(task).isActive(task.id)) {
+  if (task.agent === 'Claude' && !claudeForTask(task).isActive(task.id)) {
     try { await claudeForTask({ ...task, model: model || task.model }).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
   }
 
@@ -1957,26 +1957,7 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
     persist(task.projectId)
     broadcastTaskStatus(task)
   }
-  if (model?.startsWith(LOCAL_MODEL_PREFIX) === true) {
-    // Route to local model instead of Claude/Codex
-    const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
-    if (task.agent === 'Claude') {
-      if (!claudeForTask(task).push(task.id, message)) startClaudeTurn(task, prepareAgentPrompt(task, projectPath, message, event.id), projectPath)
-    } else {
-      activeCodexTasks.add(task.id)
-      if (task.activeTurnId && task.remoteSessionId) {
-        void codexForAccount(undefined, LOCAL_MODEL_PROVIDER_ID)!.steerTurn(task.remoteSessionId, task.activeTurnId, message)
-          .catch(async error => {
-            if (!isThreadNotFound(error)) throw error
-            const restoredThreadId = await restoreThreadFromLocalTranscript(task, projectPath)
-            await codexForAccount(undefined, LOCAL_MODEL_PROVIDER_ID)!.startTurn(restoredThreadId, message, projectPath, turnModelForTask(task), task.reasoningEffort)
-          })
-          .catch(error => failTask(task, error))
-      } else if (task.remoteSessionId) {
-        void resumeOrRestoreThread(task, projectPath, prepareAgentPrompt(task, projectPath, message, event.id)).catch(error => failTask(task, error))
-      } else startCodexTask(task, prepareAgentPrompt(task, projectPath, message, event.id), projectPath)
-    }
-  } else if (task.agent === 'Claude') {
+  if (task.agent === 'Claude') {
     const projectPath = projects.find(project => project.id === task.projectId)?.path ?? process.cwd()
     // A message sent mid-turn joins the running Claude process as the next prompt.
     if (!claudeForTask(task).push(task.id, message)) startClaudeTurn(task, prepareAgentPrompt(task, projectPath, message, event.id), projectPath)
