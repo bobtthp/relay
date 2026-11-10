@@ -1,4 +1,5 @@
 import type { AgentName, AgentService, Task } from './agentService'
+export type { AgentName }
 import type { PendingApproval } from '../../../../packages/protocol/src/types.js'
 import { isFinalAssistantMessage, isStreamingDelta } from './chatTranscript.js'
 import { authenticatedFetch } from './auth'
