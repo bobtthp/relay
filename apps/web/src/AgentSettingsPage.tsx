@@ -23,6 +23,8 @@ export function AgentSettingsPage({
   onSaveLocalModel: (provider: { agent: 'Codex' | 'Claude'; name: string; baseUrl: string; model: string; contextWindow?: number | null; autoCompactTokenLimit?: number | null; apiKey?: string | null } | null) => void
   localRegressionEnabled: boolean
   onLocalRegressionChange: (enabled: boolean) => void
+  pushUseLocalModel: boolean
+  onPushUseLocalModelChange: (enabled: boolean) => void
   providerSaving: boolean
   checkpointsEnabled: boolean
   onCheckpointsChange: (enabled: boolean) => void

@@ -678,7 +678,7 @@ function App() {
     }).catch(() => undefined)
     void authenticatedFetch('/api/settings/providers').then(async response => {
       if (!response.ok) return
-      const settings = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
+      const settings = await response.json() as { deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
       if (settings.deepseek) setDeepseekStatus(settings.deepseek)
       if (settings.localModel) setLocalModelStatus(settings.localModel)
       setLocalRegressionEnabled(settings.localRegressionEnabled === true)
@@ -900,7 +900,7 @@ function App() {
         tokenUsage?: Task['tokenUsage']
         approval?: NonNullable<Task['pendingApprovals']>[number]
         approvalId?: string
-        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; proxy?: ProxyStatus }
+        settings?: { autoApproveConfirmations?: boolean; autoAcceptDefaultMcpForms?: boolean; deepseek?: DeepSeekStatus; localModel?: LocalModelStatus; localRegressionEnabled?: boolean; pushUseLocalModel?: boolean; proxy?: ProxyStatus; checkpointsEnabled?: boolean }
         rateLimits?: RateLimits | null
         projectId?: string
         agent?: AgentName

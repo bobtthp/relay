@@ -28,6 +28,7 @@ export type ProviderSettingsStatus = {
   deepseek: { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
   localModel: { agent: 'Codex' | 'Claude'; configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null; contextWindow: number | null; autoCompactTokenLimit: number | null }
   localRegressionEnabled: boolean
+  pushUseLocalModel: boolean
   proxy: { url: string | null; systemProxy: string | null }
   checkpointsEnabled: boolean
 }
@@ -204,6 +205,7 @@ export function providerSettingsStatus(settings: ProviderSettings): ProviderSett
       keyHint: settings.localModel.apiKey ? `…${settings.localModel.apiKey.slice(-4)}` : null,
     } : { agent: 'Claude', configured: false, name: null, baseUrl: null, model: null, keyHint: null, contextWindow: null, autoCompactTokenLimit: null },
     localRegressionEnabled: settings.localRegressionEnabled === true && Boolean(settings.localModel),
+    pushUseLocalModel: settings.pushUseLocalModel === true,
     proxy: { url: settings.httpProxy ? maskProxy(settings.httpProxy) : null, systemProxy: detectSystemProxy() },
     checkpointsEnabled: settings.checkpointsEnabled === true,
   }
