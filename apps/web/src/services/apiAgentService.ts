@@ -180,6 +180,21 @@ export async function listClaudeModels(accountId?: string): Promise<CodexModel[]
   return body.items ?? []
 }
 
+export type Skill = { name: string; description: string; content: string }
+
+export async function listSkills(): Promise<Skill[]> {
+  const response = await authenticatedFetch('/api/skills')
+  if (!response.ok) throw new Error('Unable to load skills')
+  const body = await response.json() as { items?: Skill[] }
+  return body.items ?? []
+}
+
+export async function getSkill(skillName: string): Promise<Skill> {
+  const response = await authenticatedFetch(`/api/skills/${encodeURIComponent(skillName)}`)
+  if (!response.ok) throw new Error('Skill not found')
+  return response.json() as Promise<Skill>
+}
+
 export async function listTaskEvents(taskId: string) {
   const response = await authenticatedFetch(`/api/tasks/${taskId}/events`)
   if (!response.ok) throw new Error('Unable to load task events')

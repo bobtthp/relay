@@ -9,7 +9,7 @@ import {
 import { MemoryPanel } from './MemoryPanel'
 import { ProjectImagesPanel } from './ProjectImagesPanel'
 import { AgentSettingsPage } from './AgentSettingsPage'
-import { AgentRequestError, apiAgentService, getTaskTokenUsage, listAgentAccounts, listClaudeModels, listCodexModels, listTaskEvents, listTaskHistory, type AgentAccount, type CodexModel } from './services/apiAgentService'
+import { AgentRequestError, apiAgentService, getTaskTokenUsage, listAgentAccounts, listClaudeModels, listCodexModels, listSkills, listTaskEvents, listTaskHistory, type AgentAccount, type AgentName, type CodexModel, type Skill } from './services/apiAgentService'
 import { isExecutionLog, isFinalAssistantMessage, isStreamingDelta, mergeEventSnapshots, mergeSessionTimeline, type TranscriptMessage } from './services/chatTranscript'
 import { type AgentName, type Task } from './services/agentService'
 import { authenticatedFetch, getRelayAccessToken } from './services/auth'
@@ -374,6 +374,8 @@ function App() {
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>({ url: null, systemProxy: null })
   const [proxyDraft, setProxyDraft] = useState('')
   const [checkpointsEnabled, setCheckpointsEnabled] = useState(false)
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [selectedSkillNames, setSelectedSkillNames] = useState<string[]>([])
   const [modelsReloadKey, setModelsReloadKey] = useState(0)
   const completionSoundSettings = useRef({ enabled: completionSoundEnabled, quotaResetEnabled: quotaResetSoundEnabled, volume: completionSoundVolume, sound: completionSound })
   completionSoundSettings.current = { enabled: completionSoundEnabled, quotaResetEnabled: quotaResetSoundEnabled, volume: completionSoundVolume, sound: completionSound }
@@ -692,6 +694,9 @@ function App() {
       if (settings.proxy) setProxyStatus(settings.proxy)
       setCheckpointsEnabled(settings.checkpointsEnabled === true)
     }).catch(() => undefined)
+  }, [])
+  useEffect(() => {
+    listSkills().then(setSkills).catch(() => undefined)
   }, [])
   useEffect(() => {
     const available = agentAccounts.filter(account => account.agent === newTaskAgent)
@@ -1059,9 +1064,15 @@ function App() {
       notify(language === 'zh' ? '请先配置本地模型' : 'Please configure a local model first')
       return
     }
+    const selectedSkills = skills.filter(s => selectedSkillNames.includes(s.name))
+    const skillsText = selectedSkills.length > 0
+      ? (language === 'zh'
+        ? ` 使用以下 skill：${selectedSkills.map(s => s.name).join('、')}。`
+        : ` Use the following skills: ${selectedSkills.map(s => s.name).join(', ')}.`)
+      : ''
     const pushPrompt = language === 'zh'
-      ? '请评估当前任务，使用 skill 执行门禁检查、提交和推送。'
-      : 'Please evaluate the current task and use your skill to perform gate checks, commit and push.'
+      ? `请触发本地模型的 skill：1) 执行门禁检查（运行 CI、编写单测/e2e）2) 评估结果 3) 如果通过则提交代码并推送到仓库。请在执行过程中实时输出每一步的结果。${skillsText}`
+      : `Please trigger the local model skill: 1) Perform gate checks (run CI, write unit tests/e2e) 2) Evaluate results 3) If passing, commit code and push to repository. Output each step result in real time.${skillsText}`
     void apiAgentService.sendMessage(task, pushPrompt).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)

@@ -25,6 +25,25 @@ import { createProjectImageShare, deleteProjectImageShare, projectIdForImageShar
 import { agentAccount, agentAccountEnvironment, agentAccountLoginCommand, createAgentAccount, deleteAgentAccount, listAgentAccounts } from './agent-accounts.js'
 import { discoverRegressionSteps, isGitCommitCommand, parseRegressionVerdict, projectSnapshot, regressionReviewPrompt, runRegressionStep, type RegressionStepResult } from './local-regression.js'
 
+const SKILLS_DIR = path.join(os.homedir(), '.agents', 'skills')
+
+const readSkills = (): Array<{ name: string; description: string; content: string }> => {
+  if (!fs.existsSync(SKILLS_DIR)) return []
+  const entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
+  const skills: Array<{ name: string; description: string; content: string }> = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const skillPath = path.join(SKILLS_DIR, entry.name)
+    const skillMd = path.join(skillPath, 'SKILL.md')
+    if (!fs.existsSync(skillMd)) continue
+    const content = fs.readFileSync(skillMd, 'utf-8')
+    const nameMatch = content.match(/^---\s*\nname:\s*(.+)\s*\n/)
+    const descriptionMatch = content.match(/^---\s*\nname:.*\ndescription:\s*(.+)\s*\n/)
+    skills.push({ name: entry.name, description: nameMatch?.[1]?.trim() ?? descriptionMatch?.[1]?.trim() ?? entry.name, content })
+  }
+  return skills
+}
+
 const app = express()
 const server = createServer(app)
 const imageUploadBody = express.raw({ type: ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/octet-stream'], limit: '10mb' })
@@ -1378,6 +1397,19 @@ app.get('/api/models', async (request, response) => {
   const extraModels = [...(providerSettingsStatus(providerSettings).deepseek.configured ? deepseekModels : []), ...localModelCatalog(providerSettings)]
   try { return response.json({ items: [...await codexForAccount(accountId).listModels(), ...extraModels] }) }
   catch (error) { return response.status(503).json({ error: error instanceof Error ? error.message : 'Unable to load Codex models' }) }
+})
+
+app.get('/api/skills', (_request, response) => {
+  const skills = readSkills()
+  return response.json({ items: skills })
+})
+
+app.get('/api/skills/:skillName', (request, response) => {
+  const skillName = request.params.skillName
+  const skills = readSkills()
+  const skill = skills.find(s => s.name === skillName)
+  if (!skill) return response.status(404).json({ error: 'Skill not found' })
+  return response.json(skill)
 })
 
 app.get('/api/machines', (_request, response) => response.json({ items: machines }))

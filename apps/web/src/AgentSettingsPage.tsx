@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Bot, KeyRound, Server, Workflow } from 'lucide-react'
+import { Bot, KeyRound, Server, Workflow, BookOpen } from 'lucide-react'
 import { AgentAccountsPanel } from './AgentAccountsPanel'
 import type { AgentAccount } from './services/apiAgentService'
+import { listSkills, type Skill } from './services/apiAgentService'
 
 type DeepSeekStatus = { configured: boolean; source: 'relay' | 'environment' | null; keyHint: string | null }
 type LocalModelStatus = { agent?: 'Codex' | 'Claude'; configured: boolean; name: string | null; baseUrl: string | null; model: string | null; keyHint: string | null; contextWindow: number | null; autoCompactTokenLimit: number | null }
@@ -37,6 +38,8 @@ export function AgentSettingsPage({
   const [contextWindow, setContextWindow] = useState('')
   const [autoCompact, setAutoCompact] = useState('')
   const [localApiKey, setLocalApiKey] = useState('')
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null)
   useEffect(() => {
     setLocalAgent(localModelStatus.agent ?? (localModelStatus.configured ? 'Codex' : 'Claude'))
     setLocalName(localModelStatus.name ?? 'Custom model')
@@ -46,6 +49,9 @@ export function AgentSettingsPage({
     setAutoCompact(localModelStatus.autoCompactTokenLimit?.toString() ?? '')
     setLocalApiKey('')
   }, [localModelStatus])
+  useEffect(() => {
+    listSkills().then(setSkills).catch(() => {})
+  }, [])
   return <section className="agent-settings-page">
     <div className="content-header"><div className="breadcrumbs"><span className="muted">{zh ? '工作区' : 'Workspace'}</span><span>›</span><strong>{zh ? 'Agent 设置' : 'Agent settings'}</strong></div></div>
     <section className="project-hero"><div><span className="eyebrow">LOCAL CONFIGURATION</span><h1>{zh ? 'Agent 设置' : 'Agent settings'}</h1><p className="path">{zh ? '管理本机账号、模型提供方和 Agent 之间的进度交接。' : 'Manage local accounts, model providers, and handoffs between agents.'}</p></div></section>
@@ -72,11 +78,28 @@ export function AgentSettingsPage({
           <p className="auto-approval-help">{zh ? '上下文窗口和压缩阈值仅适用于 Codex；Claude 使用自身的上下文管理。' : 'Context window and compaction overrides apply to Codex; Claude manages its own context.'}</p>
           <button className="secondary-btn" type="submit" disabled={providerSaving || !localName.trim() || !localBaseUrl.trim() || !localModel.trim()}>{zh ? '保存 Provider' : 'Save provider'}</button>
         </form>
-        <div className="local-provider-actions">{localModelStatus.keyHint && <button className="secondary-btn" disabled={providerSaving} onClick={() => onSaveLocalModel({ agent: localAgent, name: localName.trim(), baseUrl: localBaseUrl.trim(), model: localModel.trim(), contextWindow: contextWindow ? Number(contextWindow) : null, autoCompactTokenLimit: autoCompact ? Number(autoCompact) : null, apiKey: null })}>{zh ? '清除 Key' : 'Remove key'}</button>}{localModelStatus.configured && <button className="secondary-btn provider-key-clear" disabled={providerSaving} onClick={() => onSaveLocalModel(null)}>{zh ? '移除 Provider' : 'Remove provider'}</button>}</div>
+        <div className="local-provider-actions">{localModelStatus.keyHint && <button className="secondary-btn" disabled={providerSaving} onClick={() => onSaveLocalModel({ agent: localAgent, name: localName.trim(), baseUrl: localBaseUrl.trim(), model: localModel.trim(), contextWindow: contextWindow ? Number(contextWindow) : null, autoCompactTokenLimit: autoCompact ? Number(autoCompact) : null, apiKey: null })}>{zh ? '清除 Key' : 'Remove key'}</button>{localModelStatus.configured && <button className="secondary-btn provider-key-clear" disabled={providerSaving} onClick={() => onSaveLocalModel(null)}>{zh ? '移除 Provider' : 'Remove provider'}</button>}</div>
         <p className="auto-approval-help">{zh ? '支持任意 HTTP 或 HTTPS 地址，但远程服务建议使用 HTTPS，避免 API Key 明文传输。Claude 需要 Anthropic Messages API（填写网关根地址）；Codex 需要 Responses API。' : 'Any HTTP or HTTPS URL is supported, but remote services should use HTTPS so API keys are not sent in cleartext. Claude requires an Anthropic Messages API (enter the gateway root URL); Codex requires a Responses API.'}</p>
         <div className="local-regression-setting"><label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={localRegressionEnabled} disabled={providerSaving || !localModelStatus.configured} onChange={event => onLocalRegressionChange(event.target.checked)} /><span>{zh ? '提交前委派回归给此 Provider' : 'Delegate pre-commit regression to this provider'}</span></label><p className="auto-approval-help">{zh ? 'Agent 请求 git commit 时，Relay 会以当前本机用户权限运行仓库的 ci-local 入口；没有共用入口时依次运行 check、test、build 和已配置的 UI 安装测试，再由此模型审核结果。只应在你信任的仓库中开启。失败、模型不可用或代码快照变化都会阻止提交。' : 'When an agent requests git commit, Relay runs the repository ci-local entry with your local user permissions; without one it runs check, test, build, and the configured UI install test, then asks this model to review the result. Enable this only for repositories you trust. Failures, an unavailable model, or a changed snapshot block the commit.'}</p></div>
         <label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={pushUseLocalModel} disabled={providerSaving || !localModelStatus.configured} onChange={event => onPushUseLocalModelChange(event.target.checked)} /><span>{zh ? 'Push 时使用本地模型' : 'Push with local model'}</span></label>
         <p className="auto-approval-help">{zh ? '开启后，所有发送的消息都会走已配置的本地模型；关闭则使用默认模型。' : 'When on, all sent messages use the configured local model; otherwise the default model is used.'}</p>
+      </div>
+      <div className="agent-settings-card agent-settings-skills"><div className="agent-settings-card-heading"><BookOpen size={17} /><div><h2>{zh ? 'Skills' : 'Skills'}</h2><p>{zh ? '读取本机 ~/.agents/skills 下的 skill 实现，提交时指定使用的 skill。' : 'Read skill implementations from ~/.agents/skills, specify which skills to use on push.'}</p></div></div>
+        {skills.length === 0 ? <p className="provider-status">{zh ? '未找到 skill' : 'No skills found'}</p> : (
+          <div className="skills-list">
+            {skills.map(skill => (
+              <div key={skill.name} className={`skill-item ${selectedSkill?.name === skill.name ? 'selected' : ''}`} onClick={() => setSelectedSkill(selectedSkill?.name === skill.name ? null : skill)}>
+                <div className="skill-item-header">
+                  <span className="skill-item-name">{skill.name}</span>
+                  <span className="skill-item-count">{zh ? '查看' : 'View'}</span>
+                </div>
+                {selectedSkill?.name === skill.name && (
+                  <pre className="skill-item-content"><code>{skill.content}</code></pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div className="agent-settings-card"><div className="agent-settings-card-heading"><Workflow size={17} /><div><h2>{zh ? '交接检查点' : 'Handoff checkpoints'}</h2><p>{zh ? '切换 Agent 时让后续 Agent 获取更完整的进度。' : 'Give the next agent a fuller progress note when switching.'}</p></div></div>
         <label className="sound-toggle auto-approval-toggle"><input type="checkbox" checked={checkpointsEnabled} disabled={providerSaving} onChange={event => onCheckpointsChange(event.target.checked)} /><span>{zh ? '让 Agent 记录进度检查点' : 'Agents keep a progress checkpoint'}</span></label>
