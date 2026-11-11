@@ -65,6 +65,13 @@ export const deepseekModels = [
 export const isDeepSeekModel = (model?: string) => model?.toLowerCase().startsWith('deepseek-') === true
 export const isLocalModel = (model?: string) => model?.startsWith(LOCAL_MODEL_PREFIX) === true
 export const localModelId = (model?: string) => isLocalModel(model) ? model!.slice(LOCAL_MODEL_PREFIX.length) : model
+export function localModelSelectionError(settings: ProviderSettings, agent: 'Codex' | 'Claude', model?: string) {
+  if (!isLocalModel(model)) return undefined
+  const local = settings.localModel
+  if (!local || (local.agent ?? 'Codex') !== agent) return `Configure a custom ${agent} model provider before using this model. The current custom provider belongs to ${local?.agent ?? 'no agent'}.`
+  if (localModelId(model) !== local.model) return 'The selected custom model is no longer configured. Choose an available model and try again.'
+  return undefined
+}
 export const modelProviderId = (model?: string) => isDeepSeekModel(model)
   ? DEEPSEEK_PROVIDER_ID
   : isLocalModel(model) ? LOCAL_MODEL_PROVIDER_ID : 'openai'

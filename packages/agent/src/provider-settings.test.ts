@@ -9,12 +9,22 @@ import {
   validContextTokens,
   localModelCatalog,
   localModelId,
+  localModelSelectionError,
   localModelProviderOverrides,
   modelProviderChanged,
   modelProviderId,
   normalizeLocalModelUrl,
   providerSettingsStatus,
 } from './provider-settings.js'
+
+test('rejects custom models for another agent or an obsolete configuration before launching', () => {
+  const settings = { localModel: { agent: 'Claude' as const, name: 'Qwen', model: 'qwen-coder', baseUrl: 'http://localhost:1234' } }
+  assert.match(localModelSelectionError(settings, 'Codex', 'relay-local:qwen-coder')!, /custom Codex model provider/)
+  assert.equal(localModelSelectionError(settings, 'Claude', 'relay-local:qwen-coder'), undefined)
+  assert.equal(localModelSelectionError(settings, 'Codex', 'gpt-6.1-sol'), undefined)
+  assert.match(localModelSelectionError({}, 'Codex', 'relay-local:qwen-coder')!, /Configure/)
+  assert.match(localModelSelectionError(settings, 'Claude', 'relay-local:old-model')!, /no longer configured/)
+})
 
 test('normalizes HTTP and HTTPS custom model endpoints', () => {
   assert.equal(normalizeLocalModelUrl(' http://127.0.0.1:11434/v1/ '), 'http://127.0.0.1:11434/v1')
