@@ -19,7 +19,7 @@ import { listDirectories, removeSavedProject, saveSelectedProject, validateProje
 import { readApprovalSettings, writeApprovalSettings } from './approval-settings.js'
 import { buildHandoff, checkpointDirectory, checkpointRule } from './handoff.js'
 import { MemoryConflictError, MemoryWatcher, applyConsolidation, consolidationInstructions, consolidationPrompt, discardConsolidation, memoryStats, parseConsolidationPlan, readConsolidation, storeConsolidationProposal, claudeMemoryPromptAppend, codexMemoryInstructions, deleteMemoryEntry, estimateTokens, memoryPrimer, importClaudeMemories, listMemoryEntries, memoryDirectory, previewClaudeImport, readMemoryAudit, readMemoryIndex, readMemorySettings, rollbackClaudeImport, setMemoryEnabled, touchesMemory, writeMemoryEntry } from './project-memory.js'
-import { localClaudeEnvironment, localModelContextOverrides, validContextTokens, DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
+import { localClaudeEnvironment, localModelContextOverrides, validContextTokens, DEEPSEEK_ENV_KEY, DEEPSEEK_PROVIDER_ID, LOCAL_MODEL_ENV_KEY, LOCAL_MODEL_PROVIDER_ID, deepseekModels, deepseekProviderOverrides, effectiveDeepSeekKey, isDeepSeekModel, isLocalModel, localModelCatalog, localModelSelectionError, localModelId, localModelProviderOverrides, modelProviderChanged, modelProviderId, normalizeLocalModelUrl, normalizeProxyUrl, providerSettingsStatus, proxyEnvironment, readProviderSettings, writeProviderSettings } from './provider-settings.js'
 import { deleteProjectImage, listProjectImages, projectImagePath, saveProjectImage } from './project-images.js'
 import { createProjectImageShare, deleteProjectImageShare, projectIdForImageShare, projectImageShare } from './project-image-shares.js'
 import { agentAccount, agentAccountEnvironment, agentAccountLoginCommand, createAgentAccount, deleteAgentAccount, listAgentAccounts } from './agent-accounts.js'
@@ -90,6 +90,10 @@ const accountForTask = (task: { agent: AgentName; accountId?: string }) => agent
 const codexHomeForTask = (task: { accountId?: string }) => agentAccount(task.accountId, 'Codex')?.configDirectory
 const codexClientKey = (accountId: string, provider: string) => `${accountId}\u0000${provider}`
 const codexForAccount = (accountId?: string, provider = 'openai') => {
+  if (provider === LOCAL_MODEL_PROVIDER_ID) {
+    const error = localModelSelectionError(providerSettings, 'Codex', `${LOCAL_MODEL_PROVIDER_ID}:${providerSettings.localModel?.model ?? ''}`)
+    if (error) throw new Error(error)
+  }
   const account = agentAccount(accountId, 'Codex')
   if (!account) throw new Error('Codex account not found')
   const clientKey = codexClientKey(account.id, provider)
@@ -1954,6 +1958,8 @@ app.post('/api/projects/:projectId/tasks', async (request, response) => {
   if (!project) return response.status(404).json({ error: 'Project not found' })
   if (!title) return response.status(400).json({ error: 'Task title is required' })
   if (!account) return response.status(400).json({ error: `${agent} account not found` })
+  const modelError = localModelSelectionError(providerSettings, agent, model)
+  if (modelError) return response.status(400).json({ error: modelError })
   if (agent === 'Claude') {
     try { await claudeForAccount(account.id, isLocalModel(model)).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
   }
@@ -1973,6 +1979,8 @@ app.post('/api/tasks/:taskId/messages', async (request, response) => {
   const reasoningEffort = typeof request.body?.reasoningEffort === 'string' ? request.body.reasoningEffort.trim() : undefined
   if (!task) return response.status(404).json({ error: 'Task not found' })
   if (!message) return response.status(400).json({ error: 'Message is required' })
+  const modelError = localModelSelectionError(providerSettings, task.agent, model || task.model)
+  if (modelError) return response.status(400).json({ error: modelError })
   if (task.agent === 'Claude' && !claudeForTask(task).isActive(task.id)) {
     try { await claudeForTask({ ...task, model: model || task.model }).ensureReady() } catch (error) { return claudeUnavailableResponse(response, error) }
   }

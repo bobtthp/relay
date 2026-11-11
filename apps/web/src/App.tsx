@@ -14,6 +14,7 @@ import { isExecutionLog, isFinalAssistantMessage, isStreamingDelta, mergeEventSn
 import { type AgentName, type Task } from './services/agentService'
 import { authenticatedFetch, getRelayAccessToken } from './services/auth'
 import type { PendingApproval } from '../../../packages/protocol/src/types.js'
+import { messageModelSelection } from './services/messageModel'
 
 const copy = {
   en: { workspace: 'WORKSPACE', connected: 'Connected', overview: 'Overview', projects: 'Projects', activity: 'Activity', workspaces: 'WORKSPACES', recentTasks: 'Recent tasks', projectActivity: 'PROJECT ACTIVITY', newTask: 'New task', searchTasks: 'Search tasks', running: 'Running', completed: 'Completed', readingSize: 'READING SIZE', language: 'LANGUAGE', completionSound: 'COMPLETION SOUND', autoApproval: 'Auto-approve eligible requests', autoApprovalHelp: 'Allows commands, reviewed file changes, and current-turn permissions.', autoAcceptDefaultForms: 'Auto-accept forms with defaults', autoAcceptDefaultFormsHelp: 'Submits an MCP form only when every required field has a valid default. Links and Codex questions still need you.', soundEnabled: 'Play when a task finishes', quotaResetSoundEnabled: 'Play when quota resets', soundStyle: 'Sound', chimeSound: 'Chime', bellSound: 'Bell', digitalSound: 'Digital', volume: 'Volume', previewSound: 'Preview sound', task: 'Task', agent: 'Agent', startTask: 'Start task', cancel: 'Cancel', ask: 'Ask', sendHint: 'Enter for new line · Shift + Enter to send', liveOutput: 'LIVE OUTPUT', selectedTask: 'SELECTED TASK' },
@@ -1040,9 +1041,7 @@ function App() {
     if (!draft.trim() || tasks[activeTask].state === 'waiting_for_approval') return
     const message = draft.trim()
     const task = tasks[activeTask]
-    const useLocal = pushUseLocalModel && localModelStatus.configured
-    const model = useLocal ? `${LOCAL_MODEL_PREFIX}${localModelStatus.model}` : (task.agent === 'Claude' ? claudeModel : effectiveModel)
-    const effort = useLocal ? '' : (task.agent === 'Claude' ? claudeEffort : effectiveEffort)
+    const { model, effort } = messageModelSelection('message', task.agent, task.agent === 'Claude' ? claudeModel : effectiveModel, task.agent === 'Claude' ? claudeEffort : effectiveEffort, pushUseLocalModel, localModelStatus)
     if (task.agent === 'Claude') {
       void apiAgentService.sendMessage(task, message, model || undefined, effort || undefined).then(() => {
         setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
@@ -1050,7 +1049,7 @@ function App() {
       }).catch(error => notifyAgentError(error, 'Unable to send message'))
       return
     }
-    if (quotaExhausted && !useLocal) return
+    if (quotaExhausted) return
     void apiAgentService.sendMessage(task, message, model || undefined, effort || undefined).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
@@ -1060,8 +1059,11 @@ function App() {
   const handlePush = async () => {
     const task = tasks[activeTask]
     if (!task) return
-    if (!localModelStatus.configured) {
-      notify(language === 'zh' ? '请先配置本地模型' : 'Please configure a local model first')
+    let selection: { model: string; effort: string }
+    try {
+      selection = messageModelSelection('push', task.agent, task.agent === 'Claude' ? claudeModel : effectiveModel, task.agent === 'Claude' ? claudeEffort : effectiveEffort, pushUseLocalModel, localModelStatus)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Unable to select push model')
       return
     }
     const selectedSkills = skills.filter(s => selectedSkillNames.includes(s.name))
@@ -1073,7 +1075,7 @@ function App() {
     const pushPrompt = language === 'zh'
       ? `请触发本地模型的 skill：1) 执行门禁检查（运行 CI、编写单测/e2e）2) 评估结果 3) 如果通过则提交代码并推送到仓库。请在执行过程中实时输出每一步的结果。${skillsText}`
       : `Please trigger the local model skill: 1) Perform gate checks (run CI, write unit tests/e2e) 2) Evaluate results 3) If passing, commit code and push to repository. Output each step result in real time.${skillsText}`
-    void apiAgentService.sendMessage(task, pushPrompt).then(() => {
+    void apiAgentService.sendMessage(task, pushPrompt, selection.model || undefined, selection.effort || undefined).then(() => {
       setTasks(current => current.map(item => item.id === task.id ? { ...item, state: 'running' } : item))
       setSent(true)
     }).catch(error => {

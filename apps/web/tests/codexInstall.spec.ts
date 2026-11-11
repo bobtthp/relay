@@ -151,6 +151,23 @@ async function mockNonEnvironmentApi(page: Page) {
   })
 }
 
+test('follow-up messages keep the selected model while explicit push uses the local model', async ({ page }) => {
+  await mockNonEnvironmentApi(page)
+  await page.route('**/api/settings/providers', route => route.fulfill({ json: {
+    localModel: { configured: true, agent: 'Codex', name: 'Qwen', model: 'qwen-coder' }, pushUseLocalModel: true,
+  } }))
+  await page.route('**/api/models?*', route => route.fulfill({ json: { items: [{ id: 'sol', model: 'sol', displayName: 'Sol', isDefault: true }] } }))
+  await page.route('**/api/models', route => route.fulfill({ json: { items: [{ id: 'sol', model: 'sol', displayName: 'Sol', isDefault: true }] } }))
+  await page.goto(appUrl)
+  await page.getByPlaceholder('Ask Codex anything...').fill('Continue the task')
+  const messageRequest = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/task-ci/messages')
+  await page.getByRole('button', { name: 'Send message', exact: true }).click()
+  expect((await messageRequest).postDataJSON().model).toBe('sol')
+  const pushRequest = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/task-ci/messages')
+  await page.getByRole('button', { name: 'Push with local model', exact: true }).click()
+  expect((await pushRequest).postDataJSON().model).toBe('relay-local:qwen-coder')
+})
+
 test('clicking Install Codex installs the CLI without signing in', async ({ page, request }) => {
   await mockNonEnvironmentApi(page)
   await page.goto(appUrl)
